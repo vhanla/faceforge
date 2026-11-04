@@ -1,5 +1,6 @@
 # Build output
 /build/
+/dist/
 /zig-out/
 /.zig-cache/
 /.cache/
@@ -33,6 +34,10 @@
 .DS_Store
 *.swp
 *.user
+
+# Python bytecode (changelog/parity helpers)
+__pycache__/
+*.pyc
 
 # Private / local workflow. These stay on disk for our own use but must
 # never be committed, so internal notes, agent rules and credentials do not

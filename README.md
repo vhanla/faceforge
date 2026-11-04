@@ -127,12 +127,14 @@ faceforge/
 │   ├── bench_to_md.py          CSV → Markdown
 │   ├── extract_emap.py         inswapper emap initializer
 │   └── verify_parity.py        numerical check vs. InsightFace
+├── packaging/                  .deb, AppImage and Inno Setup packaging
 ├── assets/                     small sample images (testing only)
 ├── docs/                       screenshots used by this README
+├── CHANGELOG.md                release notes (Keep a Changelog)
 ├── models/                     weights (git-ignored)
 ├── third_party/                ONNX Runtime SDK (git-ignored)
 ├── .github/workflows/ci.yml    Linux + Windows builds
-├── .github/workflows/release.yml  tag-triggered release packages
+├── .github/workflows/release.yml  release packages (tag or manual)
 ├── vcpkg.json                  OpenCV manifest (Windows)
 ├── CMakeLists.txt
 ├── build.zig
@@ -426,13 +428,33 @@ or with `--no-update-check`. Nothing is downloaded or installed automatically.
 ### CI and releases
 
 `.github/workflows/ci.yml` builds the core and GUI on Linux and Windows for
-every push. `.github/workflows/release.yml` builds release packages when a tag
-like `v0.2.0` is pushed and attaches them to the GitHub release; the tag is
-passed to `zig build -Dversion=...`, so About and the update checker report the
-same version. The Linux package bundles ONNX Runtime and expects the OpenCV
-runtime (`libopencv-*`); the Windows zip is self-contained because the build
-copies the DLLs next to the executable. Model weights are never included — the
-packages ship `fetch_models.sh` / `fetch_models.ps1`.
+every push and assembles the packages without publishing, so packaging
+breakage fails early. `.github/workflows/release.yml` builds the distributable
+packages and can publish them:
+
+| Artifact | Notes |
+|---|---|
+| `faceforge-<version>-linux-x64.tar.gz` | Portable bundle; needs the host OpenCV/FFmpeg/GStreamer runtime. |
+| `faceforge_<version>_amd64.deb` | Debian/Ubuntu package. Runtime libraries are declared with `dpkg-shlibdeps` and ONNX Runtime is bundled. |
+| `faceforge-<version>-x86_64.AppImage` | Portable Linux image that bundles the linked libraries; video decoding still needs the host GStreamer plugins. |
+| `faceforge-<version>-windows-x64.zip` | Portable x64 bundle. |
+| `faceforge-<version>-windows-x64-setup.exe` | Inno Setup installer (x64 only). |
+
+The installer is per-user by default: it installs under
+`%LOCALAPPDATA%\Programs\FaceForge` without elevation. Choosing an all-users
+install in the wizard asks for UAC and uses `%ProgramFiles%`. Models and the
+fetch helper always live under `%LOCALAPPDATA%\FaceForge` (or
+`~/.local/share/faceforge` on Linux), so nothing writes into a read-only
+install directory.
+
+Push a tag like `v0.2.0` to publish, or run the workflow manually with a
+version and *publish* enabled to release on demand. An existing release for the
+same tag is never overwritten unless *overwrite* is enabled. The tag is passed
+to `zig build -Dversion=...`, so About and the update checker report the same
+version. Release notes come from the matching section of `CHANGELOG.md`
+(`scripts/changelog.py notes <version>`) and fall back to `git log` when there
+is no entry. Model weights are never included — the packages ship
+`fetch_models.sh` / `fetch_models.ps1`.
 
 ## Editing video
 

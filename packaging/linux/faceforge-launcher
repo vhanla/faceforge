@@ -1,0 +1,11 @@
+#!/bin/sh
+# Run FaceForge from a per-user, writable data directory.
+#
+# The app resolves its default "models" path relative to the working
+# directory, so launching from ~/.local/share/faceforge keeps it out of the
+# read-only install tree and gives every user their own weights.
+set -e
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/faceforge"
+mkdir -p "$DATA"
+cd "$DATA"
+exec /usr/bin/faceforge-gui "$@"

@@ -1,20 +1,86 @@
 name: Release
 
-# Push a tag like v0.2.0 to build the Linux and Windows packages and publish
-# them as a GitHub release. The About panel's update checker reads
-# /releases/latest, so the tag name is the version users will see.
+# Two ways to cut a release:
+#   * push a tag like v0.2.0      -> always publishes
+#   * run this workflow manually   -> builds; publishes only when "publish" is on
+#
+# The About panel's update checker reads /releases/latest, so the tag name is
+# the version users see. An existing release for the same tag is never
+# overwritten unless "overwrite" is enabled.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, e.g. 0.2.0 (required when publishing)"
+        required: false
+      publish:
+        description: "Create or update the GitHub release"
+        type: boolean
+        default: false
+      overwrite:
+        description: "Replace an existing release for this version"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  linux:
-    name: Linux package
+  prepare:
+    name: Resolve version
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      publish: ${{ steps.v.outputs.publish }}
+      overwrite: ${{ steps.v.outputs.overwrite }}
+    steps:
+      - id: v
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          INPUT_OVERWRITE: ${{ inputs.overwrite }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            publish=true
+            overwrite=false
+          else
+            version="${INPUT_VERSION#v}"
+            publish="${INPUT_PUBLISH:-false}"
+            overwrite="${INPUT_OVERWRITE:-false}"
+          fi
+          if [[ "$publish" == "true" ]]; then
+            if [[ -z "$version" ]]; then
+              echo "::error::A version is required to publish a manual release."; exit 1
+            fi
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+              echo "::error::Version '$version' must look like X.Y.Z."; exit 1
+            fi
+          fi
+          [[ -z "$version" ]] && version="0.0.0-dev"
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "publish=$publish"
+            echo "overwrite=$overwrite"
+          } >> "$GITHUB_OUTPUT"
+          echo "FaceForge $version (publish=$publish, overwrite=$overwrite)"
+
+  linux:
+    name: Linux packages
+    needs: prepare
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -22,7 +88,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            cmake ninja-build patchelf \
+            cmake ninja-build patchelf dpkg-dev file desktop-file-utils \
             libopencv-dev \
             libgl1-mesa-dev libegl1-mesa-dev \
             python3
@@ -41,41 +107,37 @@ jobs:
         run: scripts/fetch_deps.sh
 
       - name: Build
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-            VERSION="0.0.0-dev"
-          fi
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          zig build -Doptimize=ReleaseSafe -Dversion="$VERSION"
+        run: zig build -Doptimize=ReleaseSafe -Dversion="$VERSION"
 
-      - name: Package
-        run: |
-          PKG="faceforge-${VERSION}-linux-x64"
-          mkdir -p "dist/$PKG/bin" "dist/$PKG/lib"
-          cp zig-out/bin/faceforge-gui "dist/$PKG/bin/"
-          cp zig-out/lib/libfaceforge.so "dist/$PKG/lib/"
-          # The GUI already searches $ORIGIN/../lib; point the core library at
-          # the bundled ONNX Runtime so the package does not depend on the
-          # build machine's absolute paths.
-          patchelf --set-rpath '$ORIGIN' "dist/$PKG/lib/libfaceforge.so"
-          cp -a third_party/onnxruntime/lib/libonnxruntime.so* "dist/$PKG/lib/"
-          cp README.md "dist/$PKG/"
-          cp scripts/fetch_models.sh "dist/$PKG/"
-          tar -C dist -czf "dist/$PKG.tar.gz" "$PKG"
+      - name: Portable tarball
+        run: bash packaging/linux/build_portable.sh "$VERSION"
 
-      - name: Upload package
+      - name: Debian package
+        run: bash packaging/linux/build_deb.sh "$VERSION"
+
+      - name: Cache AppImage tools
+        uses: actions/cache@v4
+        with:
+          path: .cache/appimage-tools
+          key: appimage-tools-${{ runner.os }}-v1
+
+      - name: AppImage
+        run: bash packaging/linux/build_appimage.sh "$VERSION"
+
+      - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
-          name: linux-package
-          path: dist/*.tar.gz
+          name: linux-packages
+          path: dist/*
           if-no-files-found: error
 
   windows:
-    name: Windows package
+    name: Windows packages
+    needs: prepare
     runs-on: windows-2022
     env:
       OpenCV_DIR: C:\opencv\build
+      VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -105,44 +167,91 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
-          if ($version -notmatch '^\d+\.\d+\.\d+') { $version = "0.0.0-dev" }
-          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          zig build -Doptimize=ReleaseSafe "-Dversion=$version"
+        run: zig build -Doptimize=ReleaseSafe "-Dversion=$env:VERSION"
 
-      - name: Package
+      - name: Inno Setup
         shell: pwsh
         run: |
-          $pkg = "faceforge-$env:VERSION-windows-x64"
-          New-Item -ItemType Directory -Force -Path "dist\$pkg" | Out-Null
-          Copy-Item "zig-out\bin\*" "dist\$pkg\" -Recurse
-          Copy-Item "README.md" "dist\$pkg\"
-          Copy-Item "scripts\fetch_models.ps1" "dist\$pkg\"
-          Compress-Archive -Path "dist\$pkg" -DestinationPath "dist\$pkg.zip"
+          choco install innosetup --no-progress -y
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
+            throw "Inno Setup compiler not found"
+          }
 
-      - name: Upload package
+      - name: Portable zip
+        shell: pwsh
+        run: .\packaging\windows\build_portable.ps1 -Version $env:VERSION
+
+      - name: Installer
+        shell: pwsh
+        run: |
+          .\packaging\windows\build_installer.ps1 -Version $env:VERSION `
+            -Iscc "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+
+      - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
-          name: windows-package
-          path: dist/*.zip
+          name: windows-packages
+          path: dist/*
           if-no-files-found: error
 
   publish:
     name: Publish release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows]
+    needs: [prepare, linux, windows]
+    if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+      - name: Reject a duplicate release
+        id: guard
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          OVERWRITE: ${{ needs.prepare.outputs.overwrite }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [[ "$OVERWRITE" == "true" ]]; then
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::Release $TAG already exists. Re-run with overwrite enabled to replace it."
+              exit 1
+            fi
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate release notes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python3 scripts/changelog.py notes "$VERSION" > release_notes.md
+          echo "----- release notes -----"
+          cat release_notes.md
+
+      - name: Create or update the release
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          EXISTS: ${{ steps.guard.outputs.exists }}
+        run: |
+          set -euo pipefail
+          title="FaceForge $VERSION"
+          if [[ "$EXISTS" == "true" ]]; then
+            gh release edit "$TAG" --title "$title" --notes-file release_notes.md
+            gh release upload "$TAG" dist/* --clobber
+          elif git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" dist/* --title "$title" --notes-file release_notes.md
+          else
+            gh release create "$TAG" dist/* --target "$GITHUB_SHA" \
+              --title "$title" --notes-file release_notes.md
+          fi
+          echo "==> https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"

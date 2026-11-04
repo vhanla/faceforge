@@ -16,7 +16,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            cmake ninja-build \
+            cmake ninja-build patchelf dpkg-dev file desktop-file-utils \
             libopencv-dev \
             libgl1-mesa-dev libegl1-mesa-dev \
             python3
@@ -41,6 +41,31 @@ jobs:
 
       - name: Build GUI
         run: zig build
+
+      - name: Cache AppImage tools
+        uses: actions/cache@v4
+        with:
+          path: .cache/appimage-tools
+          key: appimage-tools-${{ runner.os }}-v1
+
+      # Build the distributable packages on every push so packaging breakage is
+      # caught long before a tag is pushed. Nothing is published here.
+      - name: Build packages
+        env:
+          VERSION: 0.0.0-ci
+        run: |
+          bash packaging/linux/build_portable.sh "$VERSION"
+          bash packaging/linux/build_deb.sh "$VERSION"
+          bash packaging/linux/build_appimage.sh "$VERSION"
+
+      - name: Smoke-test packages
+        run: |
+          test -f dist/faceforge-0.0.0-ci-linux-x64.tar.gz
+          test -f dist/faceforge_0.0.0-ci_amd64.deb
+          test -f dist/faceforge-0.0.0-ci-x86_64.AppImage
+          tar tzf dist/faceforge-0.0.0-ci-linux-x64.tar.gz | grep -q bin/faceforge-gui
+          dpkg-deb --info dist/faceforge_0.0.0-ci_amd64.deb > /dev/null
+          dpkg-deb --contents dist/faceforge_0.0.0-ci_amd64.deb | grep -q usr/bin/faceforge-gui
 
       - name: Smoke test
         run: |
@@ -93,6 +118,29 @@ jobs:
       - name: Build GUI
         shell: pwsh
         run: zig build
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
+            throw "Inno Setup compiler not found"
+          }
+
+      # Build the distributable packages on every push; nothing is published.
+      - name: Build packages
+        shell: pwsh
+        env:
+          VERSION: 0.0.0-ci
+        run: |
+          .\packaging\windows\build_portable.ps1 -Version $env:VERSION
+          .\packaging\windows\build_installer.ps1 -Version $env:VERSION -Iscc "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+
+      - name: Smoke-test packages
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist\faceforge-0.0.0-ci-windows-x64.zip")) { throw "portable zip missing" }
+          if (-not (Test-Path "dist\faceforge-0.0.0-ci-windows-x64-setup.exe")) { throw "installer missing" }
 
       - name: Smoke test
         shell: pwsh

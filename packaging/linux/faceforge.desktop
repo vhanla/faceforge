@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=FaceForge
+GenericName=Face swap
+Comment=Native face restoration and face swap
+Exec=faceforge-launcher %U
+Icon=faceforge
+Terminal=false
+Categories=Graphics;Photography;Utility;
+Keywords=face;swap;restore;gfpgan;inswapper;
+StartupNotify=true

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Download the FaceForge model weights into the per-user data directory.
+#
+# The fetch script resolves its model folder from its own location, so the
+# bundled copy is run from a writable data directory rather than /usr/share.
+set -e
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/faceforge"
+mkdir -p "$DATA/scripts" "$DATA/models"
+cp -f /usr/share/faceforge/scripts/fetch_models.sh "$DATA/scripts/"
+cp -f /usr/share/faceforge/scripts/extract_emap.py "$DATA/scripts/"
+cd "$DATA"
+exec bash scripts/fetch_models.sh "$@"

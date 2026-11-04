@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1d2350"/>
+      <stop offset="1" stop-color="#3a2560"/>
+    </linearGradient>
+    <linearGradient id="fg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8be9ff"/>
+      <stop offset="1" stop-color="#7c5cff"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#bg)"/>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="none" stroke="#ffffff" stroke-opacity="0.10" stroke-width="3"/>
+
+  <!-- face -->
+  <circle cx="128" cy="112" r="40" fill="url(#fg)"/>
+  <path d="M62 216c6-40 34-64 66-64s60 24 66 64z" fill="url(#fg)"/>
+
+  <!-- eyes -->
+  <circle cx="114" cy="108" r="6.5" fill="#1d2350"/>
+  <circle cx="142" cy="108" r="6.5" fill="#1d2350"/>
+  <path d="M113 129c5 6 25 6 30 0" fill="none" stroke="#1d2350" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- swap arrows -->
+  <path d="M70 62a82 82 0 0 1 116 0" fill="none" stroke="#ffffff" stroke-opacity="0.55"
+        stroke-width="7" stroke-linecap="round"/>
+  <path d="M186 62l-3-20 20 6z" fill="#ffffff" fill-opacity="0.55"/>
+  <path d="M186 202a82 82 0 0 1-116 0" fill="none" stroke="#ffffff" stroke-opacity="0.55"
+        stroke-width="7" stroke-linecap="round"/>
+  <path d="M70 202l3 20-20-6z" fill="#ffffff" fill-opacity="0.55"/>
+</svg>
