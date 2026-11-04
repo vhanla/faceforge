@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "faceforge",
+  "version-string": "0.1.0",
+  "description": "Native face restoration and face swap (ONNX Runtime + OpenCV + DVUI)",
+  "dependencies": [
+    {
+      "name": "opencv4",
+      "default-features": false,
+      "features": [
+        "calib3d",
+        "jpeg",
+        "png",
+        "tiff",
+        "webp"
+      ]
+    }
+  ]
+}

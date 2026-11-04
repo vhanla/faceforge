@@ -1,0 +1,148 @@
+name: Release
+
+# Push a tag like v0.2.0 to build the Linux and Windows packages and publish
+# them as a GitHub release. The About panel's update checker reads
+# /releases/latest, so the tag name is the version users will see.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Linux package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build patchelf \
+            libopencv-dev \
+            libgl1-mesa-dev libegl1-mesa-dev \
+            python3
+
+      - name: Install Zig 0.17.0
+        run: |
+          curl -L --fail -o /tmp/zig.tar.xz \
+            https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
+          mkdir -p "$HOME/zig"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig" --strip-components=1
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+
+      - name: ONNX Runtime (CPU)
+        env:
+          ORT_FLAVOR: cpu
+        run: scripts/fetch_deps.sh
+
+      - name: Build
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            VERSION="0.0.0-dev"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          zig build -Doptimize=ReleaseSafe -Dversion="$VERSION"
+
+      - name: Package
+        run: |
+          PKG="faceforge-${VERSION}-linux-x64"
+          mkdir -p "dist/$PKG/bin" "dist/$PKG/lib"
+          cp zig-out/bin/faceforge-gui "dist/$PKG/bin/"
+          cp zig-out/lib/libfaceforge.so "dist/$PKG/lib/"
+          # The GUI already searches $ORIGIN/../lib; point the core library at
+          # the bundled ONNX Runtime so the package does not depend on the
+          # build machine's absolute paths.
+          patchelf --set-rpath '$ORIGIN' "dist/$PKG/lib/libfaceforge.so"
+          cp -a third_party/onnxruntime/lib/libonnxruntime.so* "dist/$PKG/lib/"
+          cp README.md "dist/$PKG/"
+          cp scripts/fetch_models.sh "dist/$PKG/"
+          tar -C dist -czf "dist/$PKG.tar.gz" "$PKG"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-package
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    name: Windows package
+    runs-on: windows-2022
+    env:
+      OpenCV_DIR: C:\opencv\build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.17.0
+        shell: pwsh
+        run: |
+          $ProgressPreference = "SilentlyContinue"
+          $url = "https://ziglang.org/download/0.17.0/zig-x86_64-windows-0.17.0.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\zig.zip"
+          Expand-Archive "$env:RUNNER_TEMP\zig.zip" -DestinationPath "C:\zig" -Force
+          "C:\zig\zig-x86_64-windows-0.17.0" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: OpenCV 4.14 (prebuilt)
+        shell: pwsh
+        run: |
+          $ProgressPreference = "SilentlyContinue"
+          $url = "https://github.com/opencv/opencv/releases/download/4.14.0/opencv-4.14.0-windows.exe"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\opencv.exe"
+          7z x "$env:RUNNER_TEMP\opencv.exe" -oC:\ -y | Out-Null
+          if (-not (Test-Path "C:\opencv\build\OpenCVConfig.cmake")) {
+            throw "OpenCV extraction failed"
+          }
+
+      - name: ONNX Runtime (CPU)
+        shell: pwsh
+        run: .\scripts\fetch_deps.ps1 -Flavor cpu
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          if ($version -notmatch '^\d+\.\d+\.\d+') { $version = "0.0.0-dev" }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          zig build -Doptimize=ReleaseSafe "-Dversion=$version"
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $pkg = "faceforge-$env:VERSION-windows-x64"
+          New-Item -ItemType Directory -Force -Path "dist\$pkg" | Out-Null
+          Copy-Item "zig-out\bin\*" "dist\$pkg\" -Recurse
+          Copy-Item "README.md" "dist\$pkg\"
+          Copy-Item "scripts\fetch_models.ps1" "dist\$pkg\"
+          Compress-Archive -Path "dist\$pkg" -DestinationPath "dist\$pkg.zip"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-package
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

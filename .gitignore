@@ -1,0 +1,63 @@
+# Build output
+/build/
+/zig-out/
+/.zig-cache/
+/.cache/
+/zig-cache/
+/zig-pkg/
+/vcpkg_installed/
+/.vs/
+
+# Third-party binaries (fetched by scripts/fetch_deps.sh)
+/third_party/
+
+# Model weights are never committed. Run scripts/fetch_models.sh
+/models/*.onnx
+/models/*.bin
+/models/*.pth
+/models/*.onnx.data
+
+# Local benchmark artifacts (results/*.csv and results/*.md are committed)
+/bench/results/*.png
+/bench/results/*.json.tmp
+
+# Local sample images (except the small committed ones)
+/assets/local/
+
+# Video workspace: project files and per-project frame caches
+*.faceforge.json
+*.faceforge.cache/
+/video_out/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.user
+
+# Private / local workflow. These stay on disk for our own use but must
+# never be committed, so internal notes, agent rules and credentials do not
+# leak into the public repository.
+/AGENTS.md
+AGENTS.md
+/.opencode/
+/opencode.json
+/opencode.jsonc
+/.claude/
+/.cursor/
+/.aider*
+/.continue/
+/.codex/
+/.gemini/
+/NOTES.md
+/TODO.local.md
+/local/
+/scratch/
+*.local
+*.local.*
+.env
+.env.*
+secrets.*
+*.key
+*.pem
+*.p12
+*.faceforge.local.json

@@ -1,0 +1,25 @@
+.{
+    .name = .faceforge,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0x27035053c9be45a,
+    .dependencies = .{
+        .dvui = .{
+            .url = "git+https://github.com/david-vanderson/dvui#4ed19f847fd0ec6ec97f9600316d86c0e0cd255c",
+            .hash = "dvui-0.6.0-dev-AQFJmaGoBAG4gedKz36Pkv4RuRs86V5BjXavPsYijdkp",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "CMakeLists.txt",
+        "vcpkg.json",
+        "gui",
+        "core",
+        "bench",
+        "scripts",
+        "assets",
+        "docs",
+        "README.md",
+    },
+}

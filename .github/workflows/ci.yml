@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  linux:
+    name: Linux (CPU)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build \
+            libopencv-dev \
+            libgl1-mesa-dev libegl1-mesa-dev \
+            python3
+
+      - name: Install Zig 0.17.0
+        run: |
+          curl -L --fail -o /tmp/zig.tar.xz \
+            https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
+          mkdir -p "$HOME/zig"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig" --strip-components=1
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+
+      - name: ONNX Runtime (CPU)
+        env:
+          ORT_FLAVOR: cpu
+        run: scripts/fetch_deps.sh
+
+      - name: Build core
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release -j "$(nproc)"
+
+      - name: Build GUI
+        run: zig build
+
+      - name: Smoke test
+        run: |
+          ./build/ffbench --help > /dev/null
+          test -x zig-out/bin/faceforge-gui
+          test -f zig-out/lib/libfaceforge.so
+
+  windows:
+    name: Windows (CPU)
+    runs-on: windows-2022
+    env:
+      # Prebuilt OpenCV keeps the Windows job fast and deterministic. Developers
+      # who prefer vcpkg can omit OpenCV_DIR and set VCPKG_ROOT instead.
+      OpenCV_DIR: C:\opencv\build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.17.0
+        shell: pwsh
+        run: |
+          $ProgressPreference = "SilentlyContinue"
+          $url = "https://ziglang.org/download/0.17.0/zig-x86_64-windows-0.17.0.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\zig.zip"
+          Expand-Archive "$env:RUNNER_TEMP\zig.zip" -DestinationPath "C:\zig" -Force
+          "C:\zig\zig-x86_64-windows-0.17.0" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: OpenCV 4.14 (prebuilt)
+        shell: pwsh
+        run: |
+          $ProgressPreference = "SilentlyContinue"
+          $url = "https://github.com/opencv/opencv/releases/download/4.14.0/opencv-4.14.0-windows.exe"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\opencv.exe"
+          # The self-extracting archive already contains an `opencv\` folder, so
+          # extract to C:\ to get C:\opencv\build\OpenCVConfig.cmake.
+          7z x "$env:RUNNER_TEMP\opencv.exe" -oC:\ -y | Out-Null
+          if (-not (Test-Path "C:\opencv\build\OpenCVConfig.cmake")) {
+            throw "OpenCV extraction failed"
+          }
+
+      - name: ONNX Runtime (CPU)
+        shell: pwsh
+        run: .\scripts\fetch_deps.ps1 -Flavor cpu
+
+      - name: Build core
+        shell: pwsh
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOpenCV_DIR="$env:OpenCV_DIR"
+          cmake --build build --config Release -j $env:NUMBER_OF_PROCESSORS
+
+      - name: Build GUI
+        shell: pwsh
+        run: zig build
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          .\build\ffbench.exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "ffbench --help failed" }
+          if (-not (Test-Path .\zig-out\bin\faceforge-gui.exe)) { throw "GUI missing" }
+          if (-not (Test-Path .\zig-out\bin\faceforge.dll)) { throw "core DLL missing" }
+          if (-not (Test-Path .\zig-out\bin\onnxruntime.dll)) { throw "onnxruntime.dll not bundled" }
+          Get-ChildItem .\zig-out\bin\opencv_*.dll
