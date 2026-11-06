@@ -60,10 +60,26 @@ if(NOT EXISTS "${FACEFORGE_LIB}")
         "cmake -S . -B build && cmake --build build")
 endif()
 
+# ---- App layer (UI-agnostic state, worker, settings, C ABI wrappers) --------
+find_package(Threads REQUIRED)
+add_library(faceforge-app STATIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/app/ff.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/app/config.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/app/app.cpp"
+)
+target_include_directories(faceforge-app PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/app"
+    "${FACEFORGE_ROOT}/core/include"
+)
+target_link_libraries(faceforge-app PUBLIC "${FACEFORGE_LIB}" Threads::Threads)
+if(NOT MSVC)
+    target_compile_options(faceforge-app PRIVATE -Wall -Wextra)
+endif()
+
 # ---- Spike executable ------------------------------------------------------
 add_executable(faceforge-spike "${CMAKE_CURRENT_SOURCE_DIR}/app/spike_main.cpp")
 target_include_directories(faceforge-spike PRIVATE "${FACEFORGE_ROOT}/core/include")
-target_link_libraries(faceforge-spike PRIVATE amuie "${FACEFORGE_LIB}")
+target_link_libraries(faceforge-spike PRIVATE amuie faceforge-app "${FACEFORGE_LIB}")
 
 # Resolve the core and ONNX Runtime from the build tree.
 set(_ff_rpath "${FACEFORGE_ROOT}/build;${FACEFORGE_ROOT}/third_party/onnxruntime/lib")
