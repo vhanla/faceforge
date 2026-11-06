@@ -65,6 +65,7 @@ add_library(faceforge-app STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/app/ff.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/app/config.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/app/app.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/app/video.cpp"
 )
 target_include_directories(faceforge-app PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/app"

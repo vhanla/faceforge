@@ -85,6 +85,10 @@ struct Image {
 
     Image clone(std::string* err = nullptr) const;
     Image resized(int32_t nw, int32_t nh, std::string* err = nullptr) const;
+    // Resample a sub-rectangle without an intermediate copy (used for face
+    // thumbnails in the video workspace).
+    Image resizeRegion(int32_t x, int32_t y, int32_t w, int32_t h, int32_t nw, int32_t nh,
+                       std::string* err = nullptr) const;
     bool save(const char* path) const;
     bool encodePng(std::vector<uint8_t>& out) const;
 };

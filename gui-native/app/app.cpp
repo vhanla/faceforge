@@ -542,9 +542,47 @@ IdentitiesSnapshot App::identitiesSnapshot() const {
     return s;
 }
 
+int App::identityCount() const {
+    std::lock_guard<std::mutex> lk(ident_mu_);
+    return std::min(static_cast<int>(identities.size()), kMaxIdentities);
+}
+
+bool App::identityEmbedding(int index, float out[512]) const {
+    std::lock_guard<std::mutex> lk(ident_mu_);
+    if (index < 0 || index >= static_cast<int>(identities.size())) return false;
+    std::memcpy(out, identities[static_cast<size_t>(index)].embedding, sizeof(float) * 512);
+    return true;
+}
+
+int App::defaultIdentity() const {
+    std::lock_guard<std::mutex> lk(ident_mu_);
+    return default_identity;
+}
+
+ff::Engine* App::ensureVideoEngine(bool sequential) {
+    if (engine.ptr && engine.sequential == sequential) return &engine;
+    if (engine.ptr) engine.destroy();
+    if (model_dir.empty()) {
+        video_engine_error_ = "Model directory is empty";
+        return nullptr;
+    }
+    std::string err;
+    if (!engine.create(model_dir.c_str(), static_cast<int>(provider), sequential, &err)) {
+        video_engine_error_ = err;
+        return nullptr;
+    }
+    provider_name = engine.provider();
+    engine.setRestoreMouth(restore_mouth ? 1 : 0);
+    return &engine;
+}
+
 // ---- worker ----------------------------------------------------------------
 
 void App::spawnJob(JobKind kind, int arg) {
+    if (videoBusy()) {
+        setStatus("A video job is running - finish or cancel it first", true);
+        return;
+    }
     if (busy()) {
         switch (kind) {
             case JobKind::None:

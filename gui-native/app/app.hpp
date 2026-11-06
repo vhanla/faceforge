@@ -268,6 +268,21 @@ struct App {
     bool undoEmpty() const { return undo.empty(); }
     bool redoEmpty() const { return redo.empty(); }
 
+    // ---- video workspace bridge (thread-safe) ----
+    // The video worker runs on its own thread but shares the engine and the
+    // identity library with the photo worker; the two never run concurrently
+    // (the video job refuses to start while the photo worker is busy, and
+    // spawnJob refuses while a video job is active).
+    int identityCount() const;
+    bool identityEmbedding(int index, float out[512]) const;
+    int defaultIdentity() const;
+    bool videoBusy() const { return video_busy_.load(std::memory_order_acquire); }
+    void setVideoBusy(bool on) { video_busy_.store(on, std::memory_order_release); }
+    // Creates or reuses an engine for the video worker. Returns nullptr on
+    // failure and stores the message in videoEngineError().
+    ff::Engine* ensureVideoEngine(bool sequential);
+    const std::string& videoEngineError() const { return video_engine_error_; }
+
     // Visits each identity thumbnail while holding the library lock, so the UI
     // can upload textures without racing the worker appending new identities.
     // The image pointers are valid for the duration of the call only.
@@ -355,6 +370,10 @@ private:
     // Guards the identity library against the UI's label snapshot while the
     // worker appends to it.
     mutable std::mutex ident_mu_;
+
+    // Set while a video workspace job owns the engine.
+    std::atomic<bool> video_busy_{false};
+    std::string video_engine_error_;
 
     ExportKind pending_export_ = ExportKind::None;
     std::string export_path_;

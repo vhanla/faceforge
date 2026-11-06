@@ -1,13 +1,14 @@
 // FaceForge native screen (see ui_faceforge.hpp).
 //
 // This began as the AMUIE demo mockup and is now the real application screen:
-// the photo workspace is driven by the UI-agnostic app layer (app::App), while
-// the video workspace is still the design mockup and will be wired in a later
-// phase. The draw pass never blocks on inference: app::App runs jobs on its own
-// worker thread and publishes status, faces and the composed result, which this
-// file reads through thread-safe snapshots.
+// the photo workspace is driven by the UI-agnostic app layer (app::App) and the
+// video workspace by app::Video. The draw pass never blocks on inference: both
+// run their jobs on background worker threads and publish status, faces,
+// frames and results, which this file reads through thread-safe snapshots.
 
 #include "ui_faceforge.hpp"
+
+#include "video.hpp"
 
 #include "platform/window.hpp"
 
@@ -322,7 +323,25 @@ void toolbar(Arena* a, UIContext* ctx, UIState* state, float rail_w) {
         if (toolbar_text_button(a, ctx, r, labels[i])) {
             if (!app) {
             } else if (video) {
-                // Video pipeline is not wired yet.
+                app::Video* v = state->video;
+                if (i == 0) {
+                    const std::string p = platform::open_file_dialog(
+                        "Open video", "*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.mpg *.mpeg",
+                        state->video_path);
+                    if (!p.empty() && v) {
+                        v->openPath(p);
+                        std::snprintf(state->video_path, sizeof(state->video_path), "%s", p.c_str());
+                    }
+                } else if (i == 1) {
+                    app->setStatus("Clipboard video paste is not supported yet", true);
+                } else if (i == 2) {
+                    const std::string p = platform::open_file_dialog(
+                        "Add identity image",
+                        "*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff", "");
+                    if (!p.empty()) app->addIdentityFile(p);
+                } else {
+                    app->setStatus("Clipboard image paste is not supported yet", true);
+                }
             } else if (i == 0) {
                 const std::string p = platform::open_file_dialog(
                     "Open target image",
@@ -904,6 +923,28 @@ void photo_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
 // ---------------------------------------------------------------------------
 // 5. Video Mode: Left Sidebar, Center Canvas & Scrubber, Right Sidebar
 // ---------------------------------------------------------------------------
+Color face_color(int i) {
+    static const Color palette[8] = {
+        {0x5f, 0xd4, 0x8f, 0xff}, {0x5a, 0xa9, 0xf0, 0xff}, {0xf0, 0xc0, 0x5a, 0xff},
+        {0xe0, 0x86, 0xd0, 0xff}, {0x6f, 0xd8, 0xd8, 0xff}, {0xf0, 0x8a, 0x6a, 0xff},
+        {0xb0, 0x9a, 0xf0, 0xff}, {0xc7, 0xcd, 0xd6, 0xff},
+    };
+    return palette[((i % 8) + 8) % 8];
+}
+
+const char* video_timecode(Arena* a, double fps, int64_t frame) {
+    const double sec = fps > 0.0 ? static_cast<double>(frame) / fps : 0.0;
+    const int m = static_cast<int>(sec) / 60;
+    const int s = static_cast<int>(sec) % 60;
+    const int ms = static_cast<int>((sec - std::floor(sec)) * 1000.0);
+    return arena_fmt(a, "%02d:%02d.%03d", m, s, ms);
+}
+
+std::string video_stem(const std::string& name) {
+    const size_t dot = name.find_last_of('.');
+    return dot == std::string::npos ? name : name.substr(0, dot);
+}
+
 void video_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& L) {
     const Theme& t = *ctx->theme;
     const float H = ctx->screen_h;
@@ -915,127 +956,505 @@ void video_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     ui_rect(a, ctx, Rect{x, view_y, w, view_bottom - view_y}, t.bg_panel);
     ui_separator(a, ctx, x + w - 0.5f, view_y, 1.0f, t.border);
 
-    const float content_h = 920.0f;
+    app::Video* v = state->video;
+    app::App* app = state->app;
+
+    if (!v || !v->isOpen()) {
+        ui_clip(a, ctx, Rect{x, view_y, w, view_bottom - view_y});
+        section_header(a, ctx, t, x, view_y + 18.0f, ICON_PLAY_FILLED, "Video workspace");
+        ui_text(a, ctx, x + 21.0f, view_y + 54.0f, "No video loaded.", t.text, 14.4f);
+        ui_text(a, ctx, x + 21.0f, view_y + 79.0f, "Open a clip to begin.", t.text_dim, 13.0f);
+        if (ui_button_icon_text(a, ctx, Rect{x + 21.0f, view_y + 108.0f, 180.0f, 40.0f}, ICON_PLAY_FILLED,
+                                "Open video...", t.accent_dim, 8.0f, 18.0f, 14.0f, true)) {
+            const std::string p = platform::open_file_dialog(
+                "Open video", "*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.mpg *.mpeg", "");
+            if (!p.empty() && v) {
+                v->openPath(p);
+                std::snprintf(state->video_path, sizeof(state->video_path), "%s", p.c_str());
+            }
+        }
+        ui_text(a, ctx, x + 21.0f, view_y + 170.0f, "Tip: drop a video anywhere in the window.",
+                t.text_dim, 12.0f);
+        ui_clip(a, ctx, Rect{0, 0, ctx->screen_w, H});
+        return;
+    }
+
+    const float content_h = 1180.0f;
     const float max_scroll = std::max(0.0f, content_h - (view_bottom - view_y));
     state->video_left_scroll = std::clamp(state->video_left_scroll, 0.0f, max_scroll);
     const float oy = view_y + 8.0f - state->video_left_scroll;
 
     ui_clip(a, ctx, Rect{x, view_y, w, view_bottom - view_y});
 
-    const Rect file_card{x + 10.0f, oy, w - 20.0f, 72.0f};
+    // ---- file card ----
+    const Rect file_card{x + 10.0f, oy, w - 20.0f, 76.0f};
     ui_rect(a, ctx, file_card, t.bg_raised, 6.0f);
     ui_rect_border(a, ctx, file_card, t.border, 6.0f, 1.0f);
+    ui_text(a, ctx, file_card.x + 10.0f, file_card.y + 8.0f, v->name().c_str(), t.text, 13.0f, 2);
+    if (ui_button_icon_text(a, ctx, Rect{file_card.x + file_card.w - 52.0f, file_card.y + 6.0f, 44.0f, 22.0f},
+                            0, "Close", t.bg_control, 4.0f, 0.0f, 11.5f, false, t.text_muted)) {
+        v->close_requested = true;
+        v->cancel();
+    }
+    const ff::Video::Info& info = v->info();
+    ui_text(a, ctx, file_card.x + 10.0f, file_card.y + 30.0f,
+            arena_fmt(a, "%dx%d \xC2\xB7 %.2f fps \xC2\xB7 %s", info.width, info.height, info.fps,
+                      info.frames > 0 ? "indexed" : "streamed"),
+            t.text_muted, 12.0f);
+    if (info.frames > 0) {
+        ui_text(a, ctx, file_card.x + 10.0f, file_card.y + 50.0f,
+                arena_fmt(a, "%lld frames \xC2\xB7 %s", static_cast<long long>(info.frames),
+                          video_timecode(a, info.fps, info.frames)),
+                t.text_dim, 12.0f);
+    }
 
-    ui_text_bold(a, ctx, file_card.x + 10.0f, file_card.y + 8.0f,
-                 "No video loaded", t.text, 13.0f);
-    ui_button_icon_text(a, ctx, Rect{file_card.x + file_card.w - 52.0f, file_card.y + 6.0f, 44.0f, 22.0f},
-                        0, "Close", t.bg_control, 4.0f, 0.0f, 11.5f, false, t.text_muted);
-    ui_text(a, ctx, file_card.x + 10.0f, file_card.y + 29.0f,
-            "Video workspace is not wired yet.", t.text_muted, 12.0f);
-    ui_text(a, ctx, file_card.x + 10.0f, file_card.y + 48.0f,
-            "Photo mode is fully functional.", t.text_dim, 12.0f);
+    float cur_y = oy + 88.0f;
 
-    float cur_y = oy + 84.0f;
-
+    // ---- analysis ----
     section_header(a, ctx, t, x, cur_y, ICON_CHART_BARS, "Analysis range");
     cur_y += 32.0f;
-
     ui_text(a, ctx, x + 16.0f, cur_y + 4.0f,
-            arena_fmt(a, "in %d \xC2\xB7 out %d", state->in_frame, state->out_frame),
+            arena_fmt(a, "in %lld \xC2\xB7 out %lld", static_cast<long long>(v->in_frame),
+                      static_cast<long long>(v->out_frame)),
             t.text, 13.5f, 2);
-
     if (ui_button_icon_text(a, ctx, Rect{x + w - 124.0f, cur_y, 52.0f, 26.0f}, 0, "Set in",
                             t.bg_control, 5.0f, 0.0f, 12.0f, false, tone_control_text(t))) {
-        state->in_frame = state->current_frame;
+        v->in_frame = v->cur;
+        if (v->out_frame < v->in_frame) v->out_frame = v->in_frame;
     }
     if (ui_button_icon_text(a, ctx, Rect{x + w - 66.0f, cur_y, 56.0f, 26.0f}, 0, "Set out",
                             t.bg_control, 5.0f, 0.0f, 12.0f, false, tone_control_text(t))) {
-        state->out_frame = state->current_frame;
+        v->out_frame = v->cur;
+        if (v->in_frame > v->out_frame) v->in_frame = v->out_frame;
     }
     cur_y += 32.0f;
 
-    ui_text(a, ctx, x + 16.0f, cur_y, "Chunk 300 \xC2\xB7 Sample every 1", t.text_muted, 12.0f);
-    cur_y += 18.0f;
-    ui_progress(a, ctx, Rect{x + 14.0f, cur_y, w - 28.0f, 6.0f}, 0.0f, t.bg_control, t.accent);
-    cur_y += 14.0f;
+    float chunk = v->chunk_f;
+    if (ui_slider(a, ctx, Rect{x + 16.0f, cur_y, w - 32.0f, 18.0f}, &chunk, 30.0f, 3000.0f, &t,
+                  ui_hash_str("vid_chunk"))) {
+        v->chunk_f = std::round(chunk / 30.0f) * 30.0f;
+    }
+    ui_text(a, ctx, x + 16.0f, cur_y + 18.0f,
+            arena_fmt(a, "Chunk %d", static_cast<int>(std::llround(v->chunk_f))), t.text_muted, 12.0f);
+    cur_y += 42.0f;
+    float stride = v->stride_f;
+    if (ui_slider(a, ctx, Rect{x + 16.0f, cur_y, w - 32.0f, 18.0f}, &stride, 1.0f, 30.0f, &t,
+                  ui_hash_str("vid_stride"))) {
+        v->stride_f = std::round(stride);
+    }
+    ui_text(a, ctx, x + 16.0f, cur_y + 18.0f,
+            arena_fmt(a, "Sample every %d", static_cast<int>(std::llround(v->stride_f))),
+            t.text_muted, 12.0f);
+    cur_y += 42.0f;
 
-    ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 110.0f, 30.0f}, 0, "Analyze range",
-                        t.accent_dim, 6.0f, 0.0f, 12.5f, true, t.on_accent);
-    ui_button_icon_text(a, ctx, Rect{x + 128.0f, cur_y, 64.0f, 30.0f}, 0, "Cancel",
-                        t.bg_control, 6.0f, 0.0f, 12.0f, false, tone_control_text(t));
-    ui_button_icon_text(a, ctx, Rect{x + 198.0f, cur_y, 56.0f, 30.0f}, 0, "Clear",
-                        t.bg_control, 6.0f, 0.0f, 12.0f, false, tone_control_text(t));
+    if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 110.0f, 30.0f}, 0, "Analyze range",
+                            t.accent_dim, 6.0f, 0.0f, 12.5f, true, t.on_accent)) {
+        v->startAnalyze();
+    }
+    if (ui_button_icon_text(a, ctx, Rect{x + 128.0f, cur_y, 64.0f, 30.0f}, 0, "Cancel",
+                            t.bg_control, 6.0f, 0.0f, 12.0f, false, tone_control_text(t))) {
+        v->cancel();
+    }
+    if (ui_button_icon_text(a, ctx, Rect{x + 198.0f, cur_y, 56.0f, 30.0f}, 0, "Clear",
+                            t.bg_control, 6.0f, 0.0f, 12.0f, false, tone_control_text(t))) {
+        v->clearAnalysis();
+    }
     cur_y += 36.0f;
-    ui_text(a, ctx, x + 16.0f, cur_y, "No analysis yet", t.text_dim, 12.0f);
-    cur_y += 24.0f;
+
+    int chunk_done = 0, chunk_total = 1;
+    v->chunkStats(&chunk_done, &chunk_total);
+    if (v->job == app::VideoJob::Analyze) {
+        ui_progress(a, ctx, Rect{x + 14.0f, cur_y, w - 28.0f, 8.0f},
+                    static_cast<float>(v->progress) / 1000.0f, t.bg_control, t.accent);
+        cur_y += 14.0f;
+        ui_text(a, ctx, x + 16.0f, cur_y,
+                arena_fmt(a, "analyzing %u/%u chunks", v->job_done_frames, v->job_total_frames),
+                t.text_muted, 12.0f);
+    } else {
+        ui_text(a, ctx, x + 16.0f, cur_y,
+                arena_fmt(a, "%d samples \xC2\xB7 %d/%d chunks analyzed", v->sampleCount(), chunk_done,
+                          chunk_total),
+                t.text_dim, 12.0f);
+    }
+    cur_y += 26.0f;
 
     ui_separator(a, ctx, x + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
+    // ---- sequences ----
     section_header(a, ctx, t, x, cur_y, ICON_HISTORY_FILLED, "Sequences");
     cur_y += 28.0f;
     ui_text(a, ctx, x + 16.0f, cur_y, "Grouped by face count and position.", t.text_muted, 12.0f);
     cur_y += 20.0f;
 
+    const int nseg = v->segmentCount();
+    if (nseg == 0) {
+        ui_text(a, ctx, x + 16.0f, cur_y, "No sequences yet \xC2\xB7 analyze a range.", t.text_dim, 12.0f);
+        cur_y += 22.0f;
+    } else {
+        const float list_h = std::min(180.0f, static_cast<float>(nseg) * 26.0f + 8.0f);
+        ui_rect(a, ctx, Rect{x + 12.0f, cur_y, w - 24.0f, list_h}, color_alpha(t.bg_raised, 0x80), 6.0f);
+        ui_clip(a, ctx, Rect{x + 12.0f, cur_y, w - 24.0f, list_h});
+        float ry = cur_y + 4.0f;
+        for (int i = 0; i < nseg && ry + 26.0f <= cur_y + list_h; ++i) {
+            const app::VidSegment seg = v->segment(i);
+            const Rect row{x + 14.0f, ry, w - 28.0f, 24.0f};
+            const uint64_t rid = ui_hash_int(static_cast<uint64_t>(i), 0x5e90);
+            const UIInteraction rin = ui_process_interaction(ctx, rid, row);
+            const bool sel = i == v->sel_seg;
+            const Color rbg = sel ? Color{0x2f, 0x5a, 0xa8, 0xff}
+                                  : (rin.hovered ? t.bg_control_hover : Color{0x27, 0x2b, 0x32, 0xff});
+            ui_rect(a, ctx, row, rbg, 4.0f);
+            ui_text(a, ctx, row.x + 8.0f, row.y + 4.0f,
+                    arena_fmt(a, "#%d  %lld-%lld", i + 1, static_cast<long long>(seg.start),
+                              static_cast<long long>(seg.end)),
+                    t.text, 12.0f, 1);
+            ui_text(a, ctx, row.x + 120.0f, row.y + 4.0f,
+                    arena_fmt(a, "%d face(s)", static_cast<int>(seg.count)), t.text_muted, 12.0f);
+            const int nedits = v->editsInRange(seg.start, seg.end);
+            if (nedits > 0) {
+                ui_text(a, ctx, row.x + 190.0f, row.y + 4.0f, arena_fmt(a, "[%d edit(s)]", nedits),
+                        Color{0xe0, 0xa0, 0x4a, 0xff}, 11.5f);
+            }
+            if (rin.clicked) {
+                v->sel_seg = i;
+                v->seekTo(seg.start);
+                v->selectSegmentAt(seg.start);
+            }
+            ry += 26.0f;
+        }
+        ui_clip(a, ctx, Rect{x, view_y, w, view_bottom - view_y});
+        cur_y += list_h + 6.0f;
+    }
+
     ui_separator(a, ctx, x + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
-    section_header(a, ctx, t, x, cur_y, ICON_USER_FILLED, "Assign identities");
-    cur_y += 28.0f;
-    ui_text(a, ctx, x + 16.0f, cur_y, "Load a video to analyze faces.", t.text_muted, 12.0f);
-    cur_y += 22.0f;
+    // ---- assign identities ----
+    if (v->sel_seg >= 0 && v->sel_seg < nseg) {
+        const app::VidSegment seg = v->segment(v->sel_seg);
+        section_header(a, ctx, t, x, cur_y, ICON_USER_FILLED, "Assign identities");
+        cur_y += 28.0f;
+        ui_text(a, ctx, x + 16.0f, cur_y,
+                arena_fmt(a, "Sequence %lld-%lld \xC2\xB7 %d face(s)", static_cast<long long>(seg.start),
+                          static_cast<long long>(seg.end), static_cast<int>(seg.count)),
+                t.text, 12.5f);
+        cur_y += 24.0f;
+
+        app::IdentitiesSnapshot ids;
+        if (app) ids = app->identitiesSnapshot();
+        const int nid = ids.count;
+        std::vector<std::string> storage;
+        std::vector<const char*> items;
+        storage.reserve(static_cast<size_t>(nid) + 2);
+        storage.push_back("(default)");
+        for (int k = 0; k < nid; ++k) storage.push_back(ids.labels[k]);
+        storage.push_back("(leave unchanged)");
+        for (auto& s : storage) items.push_back(s.c_str());
+        const int skip_choice = nid + 1;
+
+        for (int k = 0; k < seg.count && k < app::kVideoMaxFaces; ++k) {
+            const Rect row{x + 14.0f, cur_y, w - 28.0f, 46.0f};
+            const Rect th{row.x, row.y, 42.0f, 42.0f};
+            if (state->vid_face_tex[k] != 0) {
+                ui_image(a, ctx, th, state->vid_face_tex[k], Color{0xff, 0xff, 0xff, 0xff});
+            } else {
+                ui_rect(a, ctx, th, t.bg_raised, 4.0f);
+                ui_icon_center(a, ctx, th, ICON_USER_FILLED, t.text_muted, 18.0f);
+            }
+            ui_rect_border(a, ctx, th, face_color(k), 4.0f, 2.0f);
+            ui_text(a, ctx, row.x + 50.0f, row.y + 3.0f, arena_fmt(a, "Face %d", k + 1),
+                    face_color(k), 11.5f, 1);
+
+            int choice;
+            if (v->seg_ids[k] == app::kVideoSkipId) choice = skip_choice;
+            else if (v->seg_ids[k] >= 0) choice = std::min(v->seg_ids[k] + 1, nid);
+            else choice = 0;
+            const Rect cr{row.x + 50.0f, row.y + 18.0f, row.w - 54.0f, 26.0f};
+            if (ui_combo(a, ctx, cr, items.data(), static_cast<int>(items.size()), &choice, &t,
+                         ui_hash_int(static_cast<uint64_t>(k), 0x1d70))) {
+                if (choice == 0) v->setSegId(k, -1);
+                else if (choice == skip_choice) v->setSegId(k, app::kVideoSkipId);
+                else v->setSegId(k, choice - 1);
+            }
+            cur_y += 50.0f;
+        }
+
+        if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 125.0f, 28.0f}, 0, "All: default",
+                                t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
+            v->setAllSegDefault();
+        }
+        if (ui_button_icon_text(a, ctx, Rect{x + 143.0f, cur_y, 111.0f, 28.0f}, 0, "All: skip",
+                                t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
+            v->setAllSegSkip();
+        }
+        cur_y += 34.0f;
+        const float bw = (w - 28.0f) / 3.0f;
+        if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, bw - 2.0f, 30.0f}, 0, "Apply",
+                                t.accent_dim, 5.0f, 0.0f, 12.0f, true, t.on_accent)) {
+            v->applyAssignment();
+        }
+        if (ui_button_icon_text(a, ctx, Rect{x + 12.0f + bw, cur_y, bw - 2.0f, 30.0f}, 0, "Forward",
+                                t.bg_control, 5.0f, 0.0f, 12.0f, false, tone_control_text(t))) {
+            v->propagateForward();
+        }
+        if (ui_button_icon_text(a, ctx, Rect{x + 12.0f + bw * 2.0f, cur_y, bw - 2.0f, 30.0f}, 0,
+                                "This frame", t.bg_control, 5.0f, 0.0f, 12.0f, false,
+                                tone_control_text(t))) {
+            v->applyToFrame();
+        }
+        cur_y += 36.0f;
+        if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 140.0f, 28.0f}, 0, "Clear override",
+                                t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
+            v->clearFrameOverride();
+        }
+        cur_y += 34.0f;
+    } else {
+        section_header(a, ctx, t, x, cur_y, ICON_USER_FILLED, "Assign identities");
+        cur_y += 28.0f;
+        ui_text(a, ctx, x + 16.0f, cur_y, "Select a sequence above.", t.text_muted, 12.0f);
+        cur_y += 24.0f;
+    }
 
     ui_separator(a, ctx, x + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
+    // ---- studio ----
     section_header(a, ctx, t, x, cur_y, ICON_BOX_FILLED, "Studio (per-frame retouch)");
     cur_y += 30.0f;
-    ui_checkbox(a, ctx, x + 16.0f, cur_y, "Paint retouch on this frame", &state->vid_paint_retouch, &t);
-    cur_y += 36.0f;
+    {
+        bool studio = v->studio;
+        if (ui_checkbox(a, ctx, x + 16.0f, cur_y, "Paint retouch on this frame", &studio, &t)) {
+            v->studio = studio;
+            v->stroke_active = false;
+        }
+    }
+    cur_y += 34.0f;
+    if (v->studio) {
+        if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 116.0f, 28.0f}, 0, "Erase",
+                                v->studio_erase ? Color{0x7a, 0x33, 0x30, 0xff} : t.bg_control, 5.0f,
+                                0.0f, 12.0f, false,
+                                v->studio_erase ? Color{0xff, 0xd2, 0xcc, 0xff} : tone_control_text(t))) {
+            v->studio_erase = true;
+        }
+        if (ui_button_icon_text(a, ctx, Rect{x + 136.0f, cur_y, 118.0f, 28.0f}, 0, "Restore",
+                                !v->studio_erase ? Color{0x25, 0x5c, 0x39, 0xff} : t.bg_control, 5.0f,
+                                0.0f, 12.0f, false,
+                                !v->studio_erase ? Color{0xd3, 0xff, 0xe2, 0xff} : tone_control_text(t))) {
+            v->studio_erase = false;
+        }
+        cur_y += 34.0f;
+        float sz = v->studio_size;
+        if (ui_slider(a, ctx, Rect{x + 16.0f, cur_y, w - 32.0f, 16.0f}, &sz, 2.0f, 300.0f, &t,
+                      ui_hash_str("vid_brush_size"))) {
+            v->studio_size = sz;
+        }
+        ui_text(a, ctx, x + 16.0f, cur_y + 16.0f,
+                arena_fmt(a, "Size %d", static_cast<int>(v->studio_size)), t.text_muted, 12.0f);
+        cur_y += 38.0f;
+        float hard = v->studio_hard * 100.0f;
+        if (ui_slider(a, ctx, Rect{x + 16.0f, cur_y, w - 32.0f, 16.0f}, &hard, 0.0f, 100.0f, &t,
+                      ui_hash_str("vid_brush_hard"))) {
+            v->studio_hard = hard / 100.0f;
+        }
+        ui_text(a, ctx, x + 16.0f, cur_y + 16.0f,
+                arena_fmt(a, "Hard %d%%", static_cast<int>(v->studio_hard * 100.0f)), t.text_muted,
+                12.0f);
+        cur_y += 38.0f;
+        float opac = v->studio_opac * 100.0f;
+        if (ui_slider(a, ctx, Rect{x + 16.0f, cur_y, w - 32.0f, 16.0f}, &opac, 5.0f, 100.0f, &t,
+                      ui_hash_str("vid_brush_opac"))) {
+            v->studio_opac = opac / 100.0f;
+        }
+        ui_text(a, ctx, x + 16.0f, cur_y + 16.0f,
+                arena_fmt(a, "Opacity %d%%", static_cast<int>(v->studio_opac * 100.0f)), t.text_muted,
+                12.0f);
+        cur_y += 38.0f;
+        {
+            bool vo = v->studio_view_original;
+            ui_checkbox(a, ctx, x + 16.0f, cur_y, "View original", &vo, &t);
+            v->studio_view_original = vo;
+        }
+        cur_y += 30.0f;
+        const app::Video::EditInfo ei = v->currentEditInfo();
+        if (ei.strokes > 0) {
+            ui_text(a, ctx, x + 16.0f, cur_y,
+                    arena_fmt(a, "frame %lld: %d stroke(s)%s", static_cast<long long>(v->cur),
+                              ei.strokes, ei.bypassed ? " \xC2\xB7 bypassed" : ""),
+                    Color{0xe0, 0xa0, 0x4a, 0xff}, 12.0f);
+            cur_y += 22.0f;
+            bool byp = ei.bypassed;
+            if (ui_checkbox(a, ctx, x + 16.0f, cur_y, "Bypass this edit", &byp, &t)) {
+                v->setCurrentBypass(byp);
+            }
+            cur_y += 30.0f;
+        } else {
+            ui_text(a, ctx, x + 16.0f, cur_y, arena_fmt(a, "frame %lld: no edit yet",
+                                                        static_cast<long long>(v->cur)),
+                    t.text_muted, 12.0f);
+            cur_y += 24.0f;
+        }
+        if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 122.0f, 28.0f}, 0, "Undo stroke",
+                                t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
+            v->undoStroke();
+            v->res_dirty = true;
+        }
+        if (ui_button_icon_text(a, ctx, Rect{x + 140.0f, cur_y, 114.0f, 28.0f}, 0, "Delete edit",
+                                t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
+            v->deleteCurrentEdit();
+            v->res_dirty = true;
+        }
+        cur_y += 34.0f;
+        if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 150.0f, 28.0f}, 0, "Copy to similar",
+                                t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
+            v->copy_conflicts = v->countCopyConflicts();
+            if (v->copy_conflicts > 0) {
+                v->copy_pending = true;
+            } else {
+                v->copyToSimilar(true);
+                v->res_dirty = true;
+            }
+        }
+        if (ui_button_icon_text(a, ctx, Rect{x + 168.0f, cur_y, 86.0f, 28.0f}, 0, "Clear",
+                                t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
+            v->clearAllEdits();
+            v->res_dirty = true;
+        }
+        cur_y += 34.0f;
+        if (v->copy_pending) {
+            ui_text(a, ctx, x + 16.0f, cur_y,
+                    arena_fmt(a, "%d target frame(s) already edited", v->copy_conflicts),
+                    Color{0xe0, 0xa0, 0x4a, 0xff}, 12.0f);
+            cur_y += 22.0f;
+            if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 92.0f, 28.0f}, 0, "Overwrite",
+                                    t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
+                v->copyToSimilar(true);
+                v->res_dirty = true;
+                v->copy_pending = false;
+            }
+            if (ui_button_icon_text(a, ctx, Rect{x + 110.0f, cur_y, 92.0f, 28.0f}, 0, "Skip edited",
+                                    t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
+                v->copyToSimilar(false);
+                v->res_dirty = true;
+                v->copy_pending = false;
+            }
+            if (ui_button_icon_text(a, ctx, Rect{x + 208.0f, cur_y, 46.0f, 28.0f}, 0, "No",
+                                    t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
+                v->copy_pending = false;
+            }
+            cur_y += 34.0f;
+        }
+    }
 
     ui_separator(a, ctx, x + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
+    // ---- process ----
     section_header(a, ctx, t, x, cur_y, ICON_SLIDERS_FILLED, "Process & cache");
     cur_y += 30.0f;
-
-    ui_checkbox(a, ctx, x + 16.0f, cur_y, "Low quality", &state->vid_low_quality, &t);
-    ui_checkbox(a, ctx, x + 150.0f, cur_y, "Use cache", &state->vid_use_cache, &t);
+    {
+        bool low = v->low_quality;
+        if (ui_checkbox(a, ctx, x + 16.0f, cur_y, "Low quality", &low, &t)) v->low_quality = low;
+        bool uc = v->process_use_cache;
+        if (ui_checkbox(a, ctx, x + 150.0f, cur_y, "Use cache", &uc, &t)) v->process_use_cache = uc;
+    }
     cur_y += 26.0f;
-    ui_checkbox(a, ctx, x + 16.0f, cur_y, "Restore mouths", &state->vid_restore_mouths, &t);
-    ui_checkbox(a, ctx, x + 150.0f, cur_y, "Skip unassigned", &state->vid_skip_unassigned, &t);
-    cur_y += 30.0f;
-
-    ui_text(a, ctx, x + 16.0f, cur_y, "Fast 640 px pass \xC2\xB7 enhancer off", t.text_dim, 12.0f);
-    cur_y += 20.0f;
-
-    const float btn2_w = (w - 28.0f) * 0.5f;
-    ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, btn2_w, 32.0f}, 0, "Process frame",
-                        t.bg_control, 6.0f, 0.0f, 12.5f, true, tone_control_text(t));
-    ui_button_icon_text(a, ctx, Rect{x + 16.0f + btn2_w, cur_y, btn2_w, 32.0f}, 0, "Process sequence",
-                        t.bg_control, 6.0f, 0.0f, 12.5f, true, tone_control_text(t));
+    {
+        bool mouth = app ? app->restore_mouth : true;
+        if (ui_checkbox(a, ctx, x + 16.0f, cur_y, "Restore mouths", &mouth, &t)) {
+            if (app) app->restore_mouth = mouth;
+        }
+        bool dskip = v->default_skip;
+        if (ui_checkbox(a, ctx, x + 150.0f, cur_y, "Skip unassigned", &dskip, &t)) {
+            v->default_skip = dskip;
+            v->selectSegmentAt(v->cur);
+        }
+    }
+    cur_y += 28.0f;
+    if (v->low_quality) {
+        ui_text(a, ctx, x + 16.0f, cur_y, "Fast 640 px pass \xC2\xB7 enhancer off", t.text_dim, 12.0f);
+    } else if (app && app->enhancer == app::Enhancer::None) {
+        ui_text(a, ctx, x + 16.0f, cur_y, "Full res \xC2\xB7 enhancer: none", t.text_dim, 12.0f);
+    } else if (v->enhancer_failed) {
+        ui_text(a, ctx, x + 16.0f, cur_y, "Full res \xC2\xB7 enhancer failed for this clip",
+                Color{0xe0, 0xa0, 0x4a, 0xff}, 12.0f);
+    } else {
+        ui_text(a, ctx, x + 16.0f, cur_y, "Full res \xC2\xB7 enhancer on", t.text_dim, 12.0f);
+    }
+    cur_y += 24.0f;
+    {
+        const float b2 = (w - 28.0f) * 0.5f;
+        if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, b2, 32.0f}, 0, "Process frame",
+                                t.bg_control, 6.0f, 0.0f, 12.5f, true, tone_control_text(t))) {
+            v->startProcessFrame();
+        }
+        if (ui_button_icon_text(a, ctx, Rect{x + 16.0f + b2, cur_y, b2, 32.0f}, 0, "Process seq",
+                                t.bg_control, 6.0f, 0.0f, 12.5f, true, tone_control_text(t))) {
+            v->startProcessSequence();
+        }
+    }
     cur_y += 38.0f;
-
-    ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, w - 24.0f, 36.0f}, ICON_PLAY_FILLED, "Process current chunk",
-                        t.bg_control_hover, 6.0f, 16.0f, 13.0f, true, tone_control_text(t));
-    cur_y += 44.0f;
+    if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, w - 24.0f, 32.0f}, ICON_PLAY_FILLED,
+                            "Process current chunk", t.bg_control_hover, 6.0f, 16.0f, 12.5f, true,
+                            tone_control_text(t))) {
+        v->startProcessChunk();
+    }
+    cur_y += 38.0f;
+    if (v->job == app::VideoJob::Process) {
+        ui_progress(a, ctx, Rect{x + 14.0f, cur_y, w - 28.0f, 8.0f},
+                    static_cast<float>(v->progress) / 1000.0f, t.bg_control, t.accent);
+        cur_y += 14.0f;
+        ui_text(a, ctx, x + 16.0f, cur_y,
+                arena_fmt(a, "processing %u/%u", v->job_done_frames, v->job_total_frames),
+                t.text_muted, 12.0f);
+        cur_y += 24.0f;
+    }
 
     ui_separator(a, ctx, x + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
+    // ---- export ----
     section_header(a, ctx, t, x, cur_y, ICON_SAVE, "Export");
     cur_y += 30.0f;
-    ui_checkbox(a, ctx, x + 16.0f, cur_y, "Audio", &state->vid_audio, &t);
-    ui_checkbox(a, ctx, x + 120.0f, cur_y, "Split chunks", &state->vid_split_chunks, &t);
+    {
+        bool audio = v->export_audio;
+        if (ui_checkbox(a, ctx, x + 16.0f, cur_y, "Audio", &audio, &t)) v->export_audio = audio;
+        bool chunks = v->export_chunks;
+        if (ui_checkbox(a, ctx, x + 120.0f, cur_y, "Split chunks", &chunks, &t)) v->export_chunks = chunks;
+    }
     cur_y += 30.0f;
-
-    ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, btn2_w, 34.0f}, 0, "Export range",
-                        t.bg_control, 6.0f, 0.0f, 13.0f, true, tone_control_text(t));
-    ui_button_icon_text(a, ctx, Rect{x + 16.0f + btn2_w, cur_y, btn2_w, 34.0f}, 0, "Export all",
-                        t.bg_control, 6.0f, 0.0f, 13.0f, true, tone_control_text(t));
+    {
+        const float b2 = (w - 28.0f) * 0.5f;
+        if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, b2, 34.0f}, 0, "Export range",
+                                t.bg_control, 6.0f, 0.0f, 13.0f, true, tone_control_text(t))) {
+            const std::string def = video_stem(v->name()) + "_faceforge.mp4";
+            const std::string p = platform::save_file_dialog("Export range", "*.mp4", def.c_str(), def.c_str());
+            if (!p.empty()) v->startExportTo(p, v->in_frame, v->out_frame, v->export_audio, v->export_chunks);
+        }
+        if (ui_button_icon_text(a, ctx, Rect{x + 16.0f + b2, cur_y, b2, 34.0f}, 0, "Export all",
+                                t.bg_control, 6.0f, 0.0f, 13.0f, true, tone_control_text(t))) {
+            const int64_t last = v->info().frames > 0 ? v->info().frames - 1 : v->out_frame;
+            const std::string def = video_stem(v->name()) + "_faceforge.mp4";
+            const std::string p = platform::save_file_dialog("Export all", "*.mp4", def.c_str(), def.c_str());
+            if (!p.empty()) v->startExportTo(p, 0, last, v->export_audio, v->export_chunks);
+        }
+    }
     cur_y += 40.0f;
-
-    ui_text(a, ctx, x + 16.0f, cur_y, "Export always runs at the source resolution.", t.text_dim, 11.5f);
+    if (v->job == app::VideoJob::Encode) {
+        ui_progress(a, ctx, Rect{x + 14.0f, cur_y, w - 28.0f, 8.0f},
+                    static_cast<float>(v->progress) / 1000.0f, t.bg_control, t.accent);
+        cur_y += 14.0f;
+        ui_text(a, ctx, x + 16.0f, cur_y,
+                arena_fmt(a, "encoding %u/%u", v->job_done_frames, v->job_total_frames), t.text_muted,
+                12.0f);
+        cur_y += 22.0f;
+        if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 130.0f, 28.0f}, 0, "Cancel export",
+                                t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
+            v->cancel();
+        }
+        cur_y += 34.0f;
+    }
+    ui_text(a, ctx, x + 16.0f, cur_y, "Export runs at source resolution.", t.text_dim, 11.5f);
 
     ui_clip(a, ctx, Rect{0, 0, ctx->screen_w, ctx->screen_h});
 }
@@ -1043,124 +1462,218 @@ void video_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
 void video_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& L) {
     const Theme& t = *ctx->theme;
     const float x = L.canvas_x;
-    const float y = 124.0f;
+    const float top = 124.0f;
     const float w = L.canvas_w;
-    const float h = L.h - L.status_h - y;
+    const float h = L.h - L.status_h - top;
 
-    ui_rect(a, ctx, Rect{x, y, w, h}, Color{0x0e, 0x10, 0x14, 0xff}, 8.0f);
-    ui_rect_border(a, ctx, Rect{x, y, w, h}, t.border, 8.0f, 1.0f);
+    ui_rect(a, ctx, Rect{x, top, w, h}, Color{0x0e, 0x10, 0x14, 0xff}, 8.0f);
+    ui_rect_border(a, ctx, Rect{x, top, w, h}, t.border, 8.0f, 1.0f);
 
-    const float transport_h = 82.0f;
-    const float view_h = h - transport_h;
+    app::Video* v = state->video;
+    if (!v || !v->isOpen()) {
+        ui_icon_center(a, ctx, Rect{x, top, w, h - 120.0f}, ICON_PLAY, Color{0x3a, 0x40, 0x4c, 0xff}, 64.0f);
+        ui_text_center(a, ctx, Rect{x, top + h * 0.5f + 30.0f, w, 24.0f}, "Load a video to begin.",
+                       t.text_muted, 14.0f);
+        return;
+    }
 
-    const float frame_h = std::min(view_h - 20.0f, 620.0f);
-    const float frame_w = frame_h * 0.72f;
-    const float frame_x = x + (w - frame_w) * 0.5f;
-    const float frame_y = y + (view_h - frame_h) * 0.5f;
+    const float transport_h = 74.0f;
+    const float timeline_h = 52.0f;
+    const float view_h = std::max(120.0f, h - transport_h - timeline_h);
+    const Rect view_r{x, top, w, view_h};
 
-    ui_rect(a, ctx, Rect{frame_x, frame_y, frame_w, frame_h}, Color{0x1e, 0x22, 0x2b, 0xff}, 4.0f);
-    ui_icon_center(a, ctx, Rect{frame_x, frame_y, frame_w, frame_h}, ICON_PLAY,
-                   Color{0x3a, 0x40, 0x4c, 0xff}, 64.0f);
+    const bool show_result = state->vid_res_tex != 0 && !v->show_original;
+    uint64_t tex = show_result ? state->vid_res_tex : state->vid_cur_tex;
+    int tex_w = show_result ? state->vid_res_tex_w : state->vid_cur_tex_w;
+    int tex_h = show_result ? state->vid_res_tex_h : state->vid_cur_tex_h;
+    if (v->studio && !v->studio_view_original && state->vid_res_tex != 0) {
+        tex = state->vid_res_tex;
+        tex_w = state->vid_res_tex_w;
+        tex_h = state->vid_res_tex_h;
+    }
 
-    const Rect trans_r{x, y + view_h, w, transport_h};
+    Rect drawn{0, 0, 0, 0};
+    if (tex != 0 && tex_w > 0 && tex_h > 0) {
+        const float aspect = static_cast<float>(tex_w) / static_cast<float>(tex_h);
+        float iw = view_r.w - 16.0f;
+        float ih = view_r.h - 16.0f;
+        if (iw / ih > aspect) iw = ih * aspect; else ih = iw / aspect;
+        drawn = Rect{view_r.x + (view_r.w - iw) * 0.5f, view_r.y + (view_r.h - ih) * 0.5f, iw, ih};
+        ui_image(a, ctx, drawn, tex, Color{0xff, 0xff, 0xff, 0xff});
+        ui_rect_border(a, ctx, drawn, color_alpha(t.border, 0xd0), 2.0f, 1.0f);
+
+        if (v->show_boxes && !v->studio && v->info().width > 0) {
+            float boxes[app::kVideoMaxFaces][4] = {};
+            const int count = v->boxesForFrame(v->cur, boxes);
+            if (count > 0) {
+                int32_t ids[app::kVideoMaxFaces];
+                v->idsForFrame(v->cur, count, ids);
+                const float sx = drawn.w / static_cast<float>(v->info().width);
+                const float sy = drawn.h / static_cast<float>(v->info().height);
+                for (int k = 0; k < count; ++k) {
+                    const Color col = ids[k] == app::kVideoSkipId ? Color{0x8b, 0x95, 0xa5, 0xff}
+                                                                  : face_color(k);
+                    ui_rect_border(a, ctx,
+                                   Rect{drawn.x + boxes[k][0] * sx, drawn.y + boxes[k][1] * sy,
+                                        boxes[k][2] * sx, boxes[k][3] * sy},
+                                   col, 2.0f, 2.0f);
+                }
+            }
+        }
+    } else {
+        ui_text_center(a, ctx, view_r, "Decoding frame...", t.text_muted, 13.0f);
+    }
+
+    // Studio painting.
+    if (v->studio && drawn.w > 0.0f && v->info().width > 0) {
+        const uint64_t sid = ui_hash_str("video_canvas");
+        const UIInteraction in = ui_process_interaction(ctx, sid, drawn, UIBehavior{.draggable = true});
+        const float src_w = static_cast<float>(v->info().width);
+        const float src_h = static_cast<float>(v->info().height);
+        auto src_coords = [&](float* ox, float* oy) {
+            *ox = (ctx->mouse_x - drawn.x) * (src_w / drawn.w);
+            *oy = (ctx->mouse_y - drawn.y) * (src_h / drawn.h);
+        };
+        float mx = 0, my = 0;
+        src_coords(&mx, &my);
+        if (in.down) v->studioBegin(mx, my);
+        else if (v->stroke_active && ctx->mouse_left_down) v->studioTo(mx, my);
+        if (v->stroke_active && !ctx->mouse_left_down) v->studioEnd();
+        if (ui_right_clicked(ctx, sid, drawn)) v->studio_erase = !v->studio_erase;
+        // Brush cursor.
+        const float cursor_r = std::max(3.0f, v->studio_size * 0.5f * (drawn.w / src_w));
+        ui_rect_border(a, ctx, Rect{ctx->mouse_x - cursor_r, ctx->mouse_y - cursor_r, cursor_r * 2.0f,
+                                    cursor_r * 2.0f},
+                       v->studio_erase ? Color{0xff, 0x9a, 0x9a, 0xc0} : Color{0x9a, 0xff, 0xb4, 0xc0},
+                       cursor_r, 1.5f);
+    }
+
+    // Transport.
+    const float ty = top + view_h;
+    const Rect trans_r{x, ty, w, transport_h};
     ui_rect(a, ctx, trans_r, t.bg_raised, 0.0f);
     ui_separator(a, ctx, trans_r.x, trans_r.y, trans_r.w, t.border);
-
     const float row1_y = trans_r.y + 8.0f;
     const float btn_w = 34.0f;
     const float btn_h = 28.0f;
-
-    const bool compact = w < 240.0f;
-    const char* play_lbl = state->is_playing ? "Pause" : "Play";
-    const uint32_t play_icon = state->is_playing ? 0u : static_cast<uint32_t>(ICON_PLAY_FILLED);
-    const Color play_bg = state->is_playing ? t.accent_dim : t.bg_control;
-    const Color play_fg = state->is_playing ? t.on_accent : tone_control_text(t);
-    if (compact) {
-        const float pw = 74.0f;
-        if (ui_button_icon_text(a, ctx, Rect{x + (w - pw) * 0.5f, row1_y, pw, btn_h},
-                                play_icon, play_lbl, play_bg, 5.0f, 14.0f, 12.5f, true, play_fg)) {
-            state->is_playing = !state->is_playing;
-        }
-    } else {
-        if (ui_button_icon_text(a, ctx, Rect{x + 14.0f, row1_y, btn_w, btn_h}, 0, "|<",
-                                t.bg_control, 5.0f, 0.0f, 12.0f, true, tone_control_text(t))) {
-            state->current_frame = state->in_frame;
-        }
-        if (ui_button_icon_text(a, ctx, Rect{x + 52.0f, row1_y, btn_w, btn_h}, 0, "<",
-                                t.bg_control, 5.0f, 0.0f, 12.0f, true, tone_control_text(t))) {
-            state->current_frame = std::max(0, state->current_frame - 1);
-        }
-        if (ui_button_icon_text(a, ctx, Rect{x + 90.0f, row1_y, 62.0f, btn_h}, play_icon,
-                                play_lbl, play_bg, 5.0f, 14.0f, 12.5f, true, play_fg)) {
-            state->is_playing = !state->is_playing;
-        }
-        if (ui_button_icon_text(a, ctx, Rect{x + 156.0f, row1_y, btn_w, btn_h}, 0, ">",
-                                t.bg_control, 5.0f, 0.0f, 12.0f, true, tone_control_text(t))) {
-            state->current_frame = std::min(state->total_frames - 1, state->current_frame + 1);
-        }
-        if (ui_button_icon_text(a, ctx, Rect{x + 194.0f, row1_y, btn_w, btn_h}, 0, ">|",
-                                t.bg_control, 5.0f, 0.0f, 12.0f, true, tone_control_text(t))) {
-            state->current_frame = state->out_frame;
-        }
+    if (ui_button_icon_text(a, ctx, Rect{x + 14.0f, row1_y, btn_w, btn_h}, 0, "|<", t.bg_control, 5.0f,
+                            0.0f, 12.0f, true, tone_control_text(t))) {
+        v->seekTo(v->in_frame);
+        v->selectSegmentAt(v->cur);
     }
-
-    const bool show_timecode = w >= 520.0f;
-    const bool show_all_boxes = w >= 810.0f;
-    const bool show_some_boxes = w >= 640.0f;
-    if (show_some_boxes) {
-        float cb_x = x + 242.0f;
-        ui_checkbox(a, ctx, cb_x, row1_y + 3.0f, "Sequence", &state->opt_sequence, &t);
+    if (ui_button_icon_text(a, ctx, Rect{x + 52.0f, row1_y, btn_w, btn_h}, 0, "<", t.bg_control, 5.0f,
+                            0.0f, 12.0f, true, tone_control_text(t))) {
+        v->stepBy(-1);
+    }
+    const bool playing = v->playing();
+    if (ui_button_icon_text(a, ctx, Rect{x + 90.0f, row1_y, 66.0f, btn_h}, playing ? 0u : static_cast<uint32_t>(ICON_PLAY_FILLED),
+                            playing ? "Pause" : "Play", playing ? t.accent_dim : t.bg_control, 5.0f,
+                            14.0f, 12.5f, true, playing ? t.on_accent : tone_control_text(t))) {
+        v->togglePlayback();
+    }
+    if (ui_button_icon_text(a, ctx, Rect{x + 160.0f, row1_y, btn_w, btn_h}, 0, ">", t.bg_control, 5.0f,
+                            0.0f, 12.0f, true, tone_control_text(t))) {
+        v->stepBy(1);
+    }
+    if (ui_button_icon_text(a, ctx, Rect{x + 198.0f, row1_y, btn_w, btn_h}, 0, ">|", t.bg_control, 5.0f,
+                            0.0f, 12.0f, true, tone_control_text(t))) {
+        v->seekTo(v->out_frame);
+        v->selectSegmentAt(v->cur);
+    }
+    if (w >= 640.0f) {
+        float cb_x = x + 248.0f;
+        bool seq = v->play_sequence;
+        ui_checkbox(a, ctx, cb_x, row1_y + 3.0f, "Sequence", &seq, &t);
+        v->play_sequence = seq;
         cb_x += 88.0f;
-        ui_checkbox(a, ctx, cb_x, row1_y + 3.0f, "Loop", &state->opt_loop, &t);
-        if (show_all_boxes) {
+        bool loop = v->loop_play;
+        ui_checkbox(a, ctx, cb_x, row1_y + 3.0f, "Loop", &loop, &t);
+        v->loop_play = loop;
+        if (w >= 810.0f) {
             cb_x += 66.0f;
-            ui_checkbox(a, ctx, cb_x, row1_y + 3.0f, "Original", &state->opt_original, &t);
+            bool orig = v->show_original;
+            ui_checkbox(a, ctx, cb_x, row1_y + 3.0f, "Original", &orig, &t);
+            v->show_original = orig;
             cb_x += 80.0f;
-            ui_checkbox(a, ctx, cb_x, row1_y + 3.0f, "Boxes", &state->opt_boxes, &t);
+            bool boxes = v->show_boxes;
+            ui_checkbox(a, ctx, cb_x, row1_y + 3.0f, "Boxes", &boxes, &t);
+            v->show_boxes = boxes;
         }
     }
-
-    if (show_timecode) {
-        const float cur_sec = static_cast<float>(state->current_frame) / state->fps;
-        const int tc_m = static_cast<int>(cur_sec) / 60;
-        const int tc_s = static_cast<int>(cur_sec) % 60;
-        const int tc_ms = static_cast<int>((cur_sec - static_cast<int>(cur_sec)) * 1000.0f);
-        ui_text_right(a, ctx, Rect{x + w - 260.0f, row1_y + 4.0f, 246.0f, 20.0f},
-                      arena_fmt(a, "+%d:+%02d.+%03d \xC2\xB7 frame %03d \xC2\xB7 000/001",
-                                tc_m, tc_s, tc_ms, state->current_frame),
-                      t.text, 12.5f, 1);
+    if (w >= 520.0f) {
+        ui_text_right(a, ctx, Rect{x + w - 268.0f, row1_y + 4.0f, 254.0f, 20.0f},
+                      arena_fmt(a, "%s \xC2\xB7 frame %lld \xC2\xB7 %u/%u",
+                                video_timecode(a, v->info().fps, v->cur),
+                                static_cast<long long>(v->cur), v->job_done_frames,
+                                v->job_total_frames),
+                      t.text, 12.0f, 1);
     }
 
-    const Rect track_r{x + 14.0f, trans_r.y + 40.0f, w - 28.0f, 18.0f};
+    // Timeline.
+    const Rect track_r{x + 14.0f, ty + 40.0f, w - 28.0f, 18.0f};
     ui_rect(a, ctx, track_r, Color{0x14, 0x16, 0x1c, 0xff}, 4.0f);
     ui_rect_border(a, ctx, track_r, t.border, 4.0f, 1.0f);
-
-    const float in_x = track_r.x + (static_cast<float>(state->in_frame) / state->total_frames) * track_r.w;
-    const float out_x = track_r.x + (static_cast<float>(state->out_frame) / state->total_frames) * track_r.w;
-    const float cache_w = std::max(2.0f, out_x - in_x);
-    ui_rect(a, ctx, Rect{in_x, track_r.y + 3.0f, cache_w, 5.0f}, Color{0x2b, 0x5b, 0xa3, 0xff}, 2.0f);
-    ui_rect(a, ctx, Rect{in_x, track_r.y + 10.0f, cache_w, 5.0f}, Color{0x23, 0x4a, 0x85, 0xff}, 2.0f);
-
-    ui_rect(a, ctx, Rect{in_x, track_r.y, 2.0f, track_r.h}, Color{0x38, 0xbd, 0xf8, 0xff});
-    ui_rect(a, ctx, Rect{in_x, track_r.y, 6.0f, 2.0f}, Color{0x38, 0xbd, 0xf8, 0xff});
-    ui_rect(a, ctx, Rect{in_x, track_r.y + track_r.h - 2.0f, 6.0f, 2.0f}, Color{0x38, 0xbd, 0xf8, 0xff});
-
-    ui_rect(a, ctx, Rect{out_x - 1.0f, track_r.y, 2.0f, track_r.h}, Color{0xfb, 0x92, 0x3c, 0xff});
-    ui_rect(a, ctx, Rect{out_x - 5.0f, track_r.y, 6.0f, 2.0f}, Color{0xfb, 0x92, 0x3c, 0xff});
-    ui_rect(a, ctx, Rect{out_x - 5.0f, track_r.y + track_r.h - 2.0f, 6.0f, 2.0f}, Color{0xfb, 0x92, 0x3c, 0xff});
-
-    const float play_x = track_r.x + (static_cast<float>(state->current_frame) / state->total_frames) * track_r.w;
-    ui_rect(a, ctx, Rect{play_x - 1.0f, track_r.y - 2.0f, 2.5f, track_r.h + 4.0f}, Color{0xfa, 0xcc, 0x15, 0xff});
-    ui_rect(a, ctx, Rect{play_x - 3.5f, track_r.y - 3.0f, 7.0f, 4.0f}, Color{0xfa, 0xcc, 0x15, 0xff}, 1.5f);
-
-    const uint64_t track_id = ui_hash_str("timeline_track");
-    const UIInteraction track_in = ui_process_interaction(ctx, track_id, track_r, UIBehavior{ .draggable = true });
-    if (track_in.dragging || track_in.clicked) {
-        const float norm = (ctx->mouse_x - track_r.x) / track_r.w;
-        state->current_frame = std::clamp(static_cast<int>(norm * state->total_frames), 0, state->total_frames - 1);
+    const int64_t total = v->info().frames > 0 ? v->info().frames : std::max<int64_t>(1, v->out_frame + 1);
+    auto xfor = [&](int64_t frame) {
+        return track_r.x + (static_cast<float>(frame) / static_cast<float>(total)) * track_r.w;
+    };
+    const int nseg = v->segmentCount();
+    for (int i = 0; i < nseg; ++i) {
+        const app::VidSegment seg = v->segment(i);
+        const float x0 = xfor(seg.start);
+        const float x1 = xfor(seg.end + 1);
+        const bool sel = i == v->sel_seg;
+        const Color col = sel ? Color{0x4c, 0x8b, 0xf5, 0xff} : Color{0x3c, 0x7a, 0x5c, 0xff};
+        ui_rect(a, ctx, Rect{x0, track_r.y + track_r.h - (4.0f + seg.count * 2.0f) - 2.0f,
+                             std::max(1.0f, x1 - x0), 4.0f + seg.count * 2.0f},
+                col, 2.0f);
     }
+    const float in_x = xfor(v->in_frame);
+    const float out_x = xfor(v->out_frame);
+    ui_rect(a, ctx, Rect{in_x, track_r.y, 2.0f, track_r.h}, Color{0x6f, 0xd8, 0x8f, 0xff});
+    ui_rect(a, ctx, Rect{out_x - 2.0f, track_r.y, 2.0f, track_r.h}, Color{0xf0, 0x8a, 0x6a, 0xff});
+    const float play_x = xfor(v->cur);
+    ui_rect(a, ctx, Rect{play_x - 1.0f, track_r.y - 2.0f, 3.0f, track_r.h + 4.0f},
+            Color{0xff, 0xd0, 0x5a, 0xff});
 
-    ui_text(a, ctx, x + 16.0f, trans_r.y + 64.0f, "No video loaded", t.text_dim, 11.5f);
+    const uint64_t track_id = ui_hash_str("video_timeline");
+    const UIInteraction track_in = ui_process_interaction(ctx, track_id, track_r, UIBehavior{.draggable = true});
+    if (track_in.dragging || track_in.clicked) {
+        const float norm = std::clamp((ctx->mouse_x - track_r.x) / track_r.w, 0.0f, 1.0f);
+        v->scrubbing = true;
+        v->seekTo(static_cast<int64_t>(norm * static_cast<float>(total)));
+        v->selectSegmentAt(v->cur);
+    }
+    if (v->scrubbing && !ctx->mouse_left_down) v->scrubbing = false;
+
+    // Assignment legend.
+    float ly = top + h - 0.0f;
+    (void)ly;
+    float boxes[app::kVideoMaxFaces][4] = {};
+    const int lcount = v->boxesForFrame(v->cur, boxes);
+    if (lcount > 0) {
+        int32_t ids[app::kVideoMaxFaces];
+        v->idsForFrame(v->cur, lcount, ids);
+        const int nid = state->app ? state->app->identityCount() : 0;
+        const int def = state->app ? state->app->defaultIdentity() : 0;
+        ui_text(a, ctx, x + 16.0f, trans_r.y - 20.0f, "faces:", t.text_dim, 12.0f);
+        float fx = x + 64.0f;
+        for (int k = 0; k < lcount && k < 3; ++k) {
+            const bool skipped = ids[k] == app::kVideoSkipId;
+            const int id = ids[k] >= 0 ? ids[k] : def;
+            const char* label = "default";
+            app::IdentitiesSnapshot idsnap;
+            if (state->app) {
+                idsnap = state->app->identitiesSnapshot();
+                if (id >= 0 && id < idsnap.count) label = idsnap.labels[id].c_str();
+            }
+            (void)nid;
+            ui_text(a, ctx, fx, trans_r.y - 20.0f,
+                    arena_fmt(a, "%d:%s", k + 1, skipped ? "unchanged" : label),
+                    skipped ? t.text_muted : face_color(k), 12.0f);
+            fx += 90.0f;
+        }
+    }
 }
 
 void video_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& L) {
@@ -1174,49 +1687,69 @@ void video_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
     ui_rect(a, ctx, Rect{rx, view_y, w, view_bottom - view_y}, t.bg_panel);
     ui_separator(a, ctx, rx, view_y, 1.0f, t.border);
 
-    float cur_y = view_y + 12.0f;
+    app::Video* v = state->video;
+    app::App* app = state->app;
 
+    float cur_y = view_y + 12.0f;
     section_header(a, ctx, t, rx, cur_y, ICON_USER_FILLED, "Identity library");
     cur_y += 32.0f;
 
-    const Rect lib_card{rx + 12.0f, cur_y, w - 24.0f, 62.0f};
-    ui_rect(a, ctx, lib_card, t.bg_raised, 8.0f);
-    ui_rect_border(a, ctx, lib_card, t.border, 8.0f, 1.0f);
-
-    const Rect av_r{lib_card.x + 8.0f, lib_card.y + 8.0f, 46.0f, 46.0f};
-    ui_rect(a, ctx, av_r, t.accent_dim, 6.0f);
-    ui_icon(a, ctx, av_r.x + 13.0f, av_r.y + 13.0f, ICON_USER_FILLED, t.on_accent, 20.0f);
-
-    ui_text_bold(a, ctx, lib_card.x + 62.0f, lib_card.y + 12.0f, "No video loaded", t.text, 14.0f);
-    ui_text(a, ctx, lib_card.x + 62.0f, lib_card.y + 32.0f, "Video workspace pending", t.text_muted, 12.0f, 2);
-    cur_y += 74.0f;
-
+    app::IdentitiesSnapshot ids;
+    if (app) ids = app->identitiesSnapshot();
+    if (ids.count == 0) {
+        ui_text(a, ctx, rx + 16.0f, cur_y, "No identities yet.", t.text_muted, 12.5f);
+        cur_y += 24.0f;
+    } else {
+        const float chip = 44.0f, gap = 7.0f;
+        const int max_chips = 4;
+        for (int i = 0; i < ids.count && i < max_chips; ++i) {
+            const Rect cr{rx + 14.0f + i * (chip + gap), cur_y, chip, chip};
+            if (state->identity_tex[i] != 0) {
+                ui_image(a, ctx, cr, state->identity_tex[i], Color{0xff, 0xff, 0xff, 0xff});
+            } else {
+                ui_rect(a, ctx, cr, t.bg_raised, 6.0f);
+                ui_icon_center(a, ctx, cr, ICON_USER_FILLED, t.text_muted, 20.0f);
+            }
+            const bool is_default = i == ids.default_identity;
+            ui_rect_border(a, ctx, cr, is_default ? t.accent : color_alpha(t.border, 0xc0), 6.0f,
+                           is_default ? 2.5f : 1.0f);
+        }
+        cur_y += chip + 8.0f;
+    }
     ui_separator(a, ctx, rx + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
     section_header(a, ctx, t, rx, cur_y, ICON_CLOCK, "Cache");
     cur_y += 30.0f;
-    ui_text(a, ctx, rx + 14.0f, cur_y, "No cached frames.", t.text_muted, 12.5f);
-    cur_y += 18.0f;
-    cur_y += 24.0f;
-
-    ui_button_icon_text(a, ctx, Rect{rx + 12.0f, cur_y, w - 24.0f, 30.0f}, 0, "Forget this frame's cache",
-                        t.bg_control, 5.0f, 0.0f, 12.0f, false, tone_control_text(t));
-    cur_y += 36.0f;
-    ui_button_icon_text(a, ctx, Rect{rx + 12.0f, cur_y, w - 24.0f, 30.0f}, 0, "Save project",
-                        t.bg_control, 5.0f, 0.0f, 12.0f, false, tone_control_text(t));
-    cur_y += 36.0f;
-
-    ui_text_edit(a, ctx, Rect{rx + 12.0f, cur_y, w - 24.0f, 28.0f}, state->video_path,
-                 sizeof(state->video_path), &t, "video path", 0x0f02);
-    cur_y += 42.0f;
+    if (v && v->isOpen()) {
+        ui_text(a, ctx, rx + 14.0f, cur_y,
+                arena_fmt(a, "frame %lld: %s", static_cast<long long>(v->cur),
+                          v->frameCachedHigh(v->cur) ? "high"
+                                                     : (v->frameCachedLow(v->cur) ? "low" : "none")),
+                t.text_muted, 12.5f);
+        cur_y += 22.0f;
+        if (ui_button_icon_text(a, ctx, Rect{rx + 12.0f, cur_y, w - 24.0f, 30.0f}, 0,
+                                "Forget this frame's cache", t.bg_control, 5.0f, 0.0f, 12.0f, false,
+                                tone_control_text(t))) {
+            v->forgetFrameCache();
+        }
+        cur_y += 36.0f;
+        if (ui_button_icon_text(a, ctx, Rect{rx + 12.0f, cur_y, w - 24.0f, 30.0f}, ICON_SAVE,
+                                "Save project", t.bg_control, 5.0f, 14.0f, 12.0f, false,
+                                tone_control_text(t))) {
+            v->saveProject();
+        }
+        cur_y += 36.0f;
+    } else {
+        ui_text(a, ctx, rx + 14.0f, cur_y, "No cached frames.", t.text_muted, 12.5f);
+        cur_y += 22.0f;
+    }
 
     ui_separator(a, ctx, rx + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
     section_header(a, ctx, t, rx, cur_y, ICON_INFO, "Shortcuts");
     cur_y += 30.0f;
-
     auto shortcut_row = [&](const char* key, const char* desc) {
         ui_rect(a, ctx, Rect{rx + 14.0f, cur_y, 44.0f, 20.0f}, t.bg_raised, 4.0f);
         ui_rect_border(a, ctx, Rect{rx + 14.0f, cur_y, 44.0f, 20.0f}, t.border, 4.0f, 1.0f);
@@ -1224,10 +1757,9 @@ void video_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
         ui_text(a, ctx, rx + 66.0f, cur_y + 2.0f, desc, t.text_muted, 12.0f);
         cur_y += 26.0f;
     };
-
     shortcut_row("Space", "Play / Pause");
     shortcut_row("< / >", "Step frame");
-    shortcut_row("Shift", "Jump 10 frames");
+    shortcut_row("I / O", "Set in / out");
 }
 
 // ---------------------------------------------------------------------------
@@ -1253,15 +1785,25 @@ void status_bar(Arena* a, UIContext* ctx, UIState* state) {
     if (show_right) msg_max = std::min(msg_max, W - 250.0f - 40.0f);
 
     app::App* app = app_of(state);
-    const bool busy = app && app->busy();
-    const bool err = app && app->statusIsError();
+    app::Video* vid = state->mode == AppMode::Video ? state->video : nullptr;
+    const bool vbusy = vid && vid->active();
+    const bool busy = vbusy || (app && app->busy());
+    const bool err = vid ? vid->status_err : (app && app->statusIsError());
     const Color dot = busy ? t.accent : (err ? t.danger : Color{0x34, 0xd3, 0x99, 0xff});
     ui_rect(a, ctx, Rect{12.0f, bar.y + 9.0f, 8.0f, 8.0f}, dot, 4.0f);
 
-    const char* msg = app ? app->statusText().c_str() : "Ready";
-    if (busy && app) {
-        msg = arena_fmt(a, "%s \xC2\xB7 %s \xC2\xB7 %d%%", app->statusText().c_str(),
-                        app::stageText(app->stage()), app->progressPermille() / 10);
+    const char* msg;
+    if (vid) {
+        msg = vid->status.empty() ? "Ready" : vid->status.c_str();
+        if (vbusy) {
+            msg = arena_fmt(a, "%s \xC2\xB7 %d%%", msg, static_cast<int>(vid->progress) / 10);
+        }
+    } else {
+        msg = app ? app->statusText().c_str() : "Ready";
+        if (busy && app) {
+            msg = arena_fmt(a, "%s \xC2\xB7 %s \xC2\xB7 %d%%", app->statusText().c_str(),
+                            app::stageText(app->stage()), app->progressPermille() / 10);
+        }
     }
     ui_text(a, ctx, 26.0f, bar.y + 6.0f,
             ui_text_ellipsized(a, msg, 12.0f, 0, msg_max),
@@ -1275,10 +1817,13 @@ void status_bar(Arena* a, UIContext* ctx, UIState* state) {
     }
 
     if (show_right) {
-        const char* right = (app && app->base.valid())
-                                ? arena_fmt(a, "%dx%d \xC2\xB7 F2 Theme",
-                                            app->base.width, app->base.height)
-                                : "F2 Theme";
+        const char* right = "F2 Theme";
+        if (vid && vid->isOpen()) {
+            right = arena_fmt(a, "%dx%d \xC2\xB7 %.2f fps \xC2\xB7 F2 Theme", vid->info().width,
+                              vid->info().height, vid->info().fps);
+        } else if (app && app->base.valid()) {
+            right = arena_fmt(a, "%dx%d \xC2\xB7 F2 Theme", app->base.width, app->base.height);
+        }
         ui_text(a, ctx, W - 250.0f, bar.y + 5.0f, right, t.text_dim, 11.5f);
     }
 
@@ -1470,23 +2015,6 @@ void faceforge_draw(Arena* frame, UIContext* ui, UIState* state) {
     ui_rect(frame, ui, Rect{0, 0, W, H}, t.bg_app);
 
     const Layout L = compute_layout(ui, state);
-
-    if (state->mode == AppMode::Video && state->is_playing) {
-        state->play_accum += ui->dt * state->fps;
-        while (state->play_accum >= 1.0f) {
-            state->play_accum -= 1.0f;
-            state->current_frame++;
-            if (state->current_frame > state->out_frame) {
-                if (state->opt_loop) {
-                    state->current_frame = state->in_frame;
-                } else {
-                    state->current_frame = state->out_frame;
-                    state->is_playing = false;
-                    break;
-                }
-            }
-        }
-    }
 
     if (ui->scroll_delta != 0.0f && ui->mouse_y >= 124.0f && ui->mouse_y < H - L.status_h) {
         if (ui->mouse_x >= L.left_x && ui->mouse_x < L.left_x + L.left_w) {

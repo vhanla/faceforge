@@ -1,21 +1,29 @@
 #pragma once
 // FaceForge native screen, drawn with the vendored AMUIE immediate-mode
 // widgets and bound to the UI-agnostic app layer (app.hpp). The screen owns
-// only presentation state: theme, scroll offsets, view toggles, the video
-// mock and dialog visibility. Everything about the pipeline (engine, faces,
-// identities, result, undo) lives in app::App and is read through `app`.
+// only presentation state: theme, scroll offsets, view toggles, dialog
+// visibility and the video workspace pointer. Everything about the pipeline
+// (engine, faces, identities, result, undo) lives in app::App and is read
+// through `app`; the video pipeline lives in app::Video and is read through
+// `video`.
 //
 // Textures are owned by the caller (the backend), so the screen renders image
-// ids that the entry point fills from `app` each frame:
+// ids that the entry point fills from `app`/`video` each frame:
 //   base_tex    pristine input image (the "Original" view)
 //   result_tex  composed/retouched output (the normal view)
 //   face_tex[]  per-face thumbnails
 //   identity_tex[] identity thumbnails
+//   vid_cur_tex / vid_res_tex / vid_face_tex[]  video frame, processed frame
+//                                               and sequence face crops
 
 #include "app.hpp"
 
 #include "core/arena.hpp"
 #include "core/types.hpp"
+
+namespace app {
+class Video;
+}
 
 enum class WindowAction { None, Minimize, Maximize, Close };
 enum class AppMode { Photo, Video };
@@ -38,33 +46,20 @@ struct UIState {
     float left_scroll = 0.0f;  // vertical scroll of the left sidebar (logical px)
     float studio_scroll = 0.0f;
 
-    // Video mode state (mockup; the real pipeline lands in a later phase)
+    // Video workspace: the pipeline state lives in app::Video (owned by the
+    // entry point); the screen only keeps presentation state.
+    app::Video* video = nullptr;
     float video_left_scroll = 0.0f;
-    float video_right_scroll = 0.0f;
-    int current_frame = 28;
-    int total_frames = 121;
-    int in_frame = 0;
-    int out_frame = 120;
-    float fps = 24.0f;
-    bool is_playing = false;
-    float play_accum = 0.0f;
-
-    bool opt_sequence = true;
-    bool opt_loop = true;
-    bool opt_original = false;
-    bool opt_boxes = true;
-
-    bool vid_low_quality = true;
-    bool vid_use_cache = true;
-    bool vid_restore_mouths = true;
-    bool vid_skip_unassigned = false;
-    bool vid_paint_retouch = false;
-    bool vid_audio = true;
-    bool vid_split_chunks = false;
-
-    int selected_sequence = 0;
-    int identity_model_index = 0;
     char video_path[512] = "";
+
+    // Video canvas textures, filled by the entry point each frame.
+    uint64_t vid_cur_tex = 0;
+    int vid_cur_tex_w = 0;
+    int vid_cur_tex_h = 0;
+    uint64_t vid_res_tex = 0;
+    int vid_res_tex_w = 0;
+    int vid_res_tex_h = 0;
+    uint64_t vid_face_tex[8] = {};
 
     // Dialogs / Modals
     bool show_settings = false;

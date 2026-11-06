@@ -7,12 +7,13 @@
 //
 // The only work this file does beyond the frame loop is texture lifetime: the
 // UI draws image ids, so the entry point uploads / destroys the base, result,
-// face-thumbnail and identity-thumbnail textures as the app's dirty flags and
-// generations change.
+// face-thumbnail, identity-thumbnail and video-frame textures as the app's
+// dirty flags and generations change.
 
 #include "app.hpp"
 #include "config.hpp"
 #include "ui_faceforge.hpp"
+#include "video.hpp"
 
 #include "backend/opengl3_backend.hpp"
 #include "core/arena.hpp"
@@ -29,6 +30,8 @@
 #include <cstring>
 #include <string>
 #include <vector>
+
+#include <GLFW/glfw3.h>
 
 namespace {
 
@@ -53,6 +56,7 @@ struct Options {
     int frames = 3;
     bool light = false;
     bool video = false;
+    std::string video_path;
     bool wait_idle = false;
     int width = kDesignW;
     int height = kDesignH;
@@ -72,7 +76,7 @@ void print_usage(const char* argv0) {
         "  --no-update-check   disable the update check\n"
         "  --check-updates     enable the update check\n"
         "  --save PATH         save path used by the Output field\n"
-        "  --video             start in the video workspace\n"
+        "  --video [PATH]      start in the video workspace, optionally opening PATH\n"
         "  --light             start with the light theme\n"
         "  --screenshot OUT    render a few frames, write a PPM and exit\n"
         "  --frames N          frames to render before the screenshot (default 3)\n"
@@ -142,6 +146,7 @@ Options parse_args(int argc, char** argv) {
             o.light = true;
         } else if (std::strcmp(a, "--video") == 0) {
             o.video = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') o.video_path = argv[++i];
         } else if (std::strcmp(a, "--wait") == 0) {
             o.wait_idle = true;
         } else if (std::strcmp(a, "--help") == 0 || std::strcmp(a, "-h") == 0) {
@@ -180,6 +185,20 @@ void apply_cli(app::App& app, const Options& o) {
         app.save_path = o.save;
         app.save_explicit = true;
     }
+}
+
+bool is_video_path(const char* path) {
+    if (!path) return false;
+    const char* dot = std::strrchr(path, '.');
+    if (!dot) return false;
+    std::string ext;
+    for (const char* p = dot + 1; *p; ++p) {
+        char c = *p;
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        ext.push_back(c);
+    }
+    return ext == "mp4" || ext == "mov" || ext == "mkv" || ext == "webm" || ext == "avi" ||
+           ext == "m4v" || ext == "mpg" || ext == "mpeg";
 }
 
 // ---- texture lifetime ------------------------------------------------------
@@ -254,9 +273,36 @@ void sync_textures(OpenGL3Backend& backend, app::App& app, UIState& st) {
     }
 }
 
+void sync_video_textures(OpenGL3Backend& backend, app::Video& video, UIState& st) {
+    if (video.cur_dirty) {
+        video.cur_dirty = false;
+        upload_image(backend, st.vid_cur_tex, st.vid_cur_tex_w, st.vid_cur_tex_h,
+                     video.cur_img.valid() ? &video.cur_img : nullptr);
+    }
+    if (video.res_dirty) {
+        video.res_dirty = false;
+        upload_image(backend, st.vid_res_tex, st.vid_res_tex_w, st.vid_res_tex_h,
+                     video.res_img.valid() ? &video.res_img : nullptr);
+    }
+    for (int i = 0; i < app::kVideoMaxFaces; ++i) {
+        if (video.face_thumbs[i].dirty) {
+            video.face_thumbs[i].dirty = false;
+            upload_thumb(backend, st.vid_face_tex[i], video.face_thumbs[i].img);
+        } else if (!video.face_thumbs[i].img.valid() && st.vid_face_tex[i]) {
+            backend.destroy_texture(st.vid_face_tex[i]);
+            st.vid_face_tex[i] = 0;
+        }
+    }
+}
+
 void destroy_textures(OpenGL3Backend& backend, UIState& st) {
     if (st.base_tex) backend.destroy_texture(st.base_tex);
     if (st.result_tex) backend.destroy_texture(st.result_tex);
+    if (st.vid_cur_tex) backend.destroy_texture(st.vid_cur_tex);
+    if (st.vid_res_tex) backend.destroy_texture(st.vid_res_tex);
+    for (int i = 0; i < app::kVideoMaxFaces; ++i) {
+        if (st.vid_face_tex[i]) backend.destroy_texture(st.vid_face_tex[i]);
+    }
     for (int i = 0; i < app::kMaxFaces; ++i) {
         if (st.face_tex[i]) backend.destroy_texture(st.face_tex[i]);
     }
@@ -336,6 +382,7 @@ int main(int argc, char** argv) {
     }
 
     app::App* app = new app::App();
+    app::Video* video = new app::Video(app);
 
     // ---- configuration precedence: CLI > environment > file > defaults ----
     const bool test_mode = std::getenv("FACEFORGE_SELFTEST") != nullptr ||
@@ -352,6 +399,7 @@ int main(int argc, char** argv) {
     apply_cli(*app, options);
 
     state->app = app;
+    state->video = video;
     state->light_theme = options.light;
     state->mode = options.video ? AppMode::Video : AppMode::Photo;
     std::snprintf(state->models_dir, sizeof(state->models_dir), "%s", app->model_dir.c_str());
@@ -382,11 +430,35 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Match the Zig GUI: the bundled portrait is the default identity unless a
+    // run supplies its own list.
+    if (identities.empty()) identities.push_back("assets/source_lena.jpg");
+
     if (!target.empty()) {
         app->openTarget(target);
         state->sync_output_path = true;
     }
     for (const std::string& p : identities) app->addIdentityFile(p);
+
+    // Video mode: the autotest owns opening (+ analysis/export/playback), a
+    // path from the CLI or FACEFORGE_VIDEO opens the workspace directly.
+    if (const char* p = std::getenv("FACEFORGE_VIDEOTEST")) {
+        state->mode = AppMode::Video;
+        video->setAutotest(p);
+    } else {
+        std::string open_video;
+        if (!options.video_path.empty()) {
+            open_video = options.video_path;
+        } else if (const char* p = std::getenv("FACEFORGE_VIDEO")) {
+            open_video = p;
+        }
+        if (!open_video.empty()) {
+            state->mode = AppMode::Video;
+            video->openPath(open_video);
+            std::snprintf(state->video_path, sizeof(state->video_path), "%s",
+                          open_video.c_str());
+        }
+    }
 
     OpenGL3Backend backend;
     backend.init();
@@ -397,6 +469,12 @@ int main(int argc, char** argv) {
     bool prev_f2_down = false;
     bool prev_space_down = false;
     bool prev_esc_down = false;
+    bool prev_left_down = false;
+    bool prev_right_down = false;
+    bool prev_home_down = false;
+    bool prev_end_down = false;
+    bool prev_i_down = false;
+    bool prev_o_down = false;
     double prev_time = platform::time_seconds();
     double ui_ms_total = 0.0;
     int ui_frames = 0;
@@ -424,30 +502,68 @@ int main(int argc, char** argv) {
         if (f2_down && !prev_f2_down) state->light_theme = !state->light_theme;
         prev_f2_down = f2_down;
 
-        const bool space_down = platform::key_pressed(window, platform::Key::Space);
-        if (space_down && !prev_space_down && state->mode == AppMode::Video) {
-            state->is_playing = !state->is_playing;
-        }
+        auto edge = [&](int key, bool& prev) {
+            const bool down = platform::key_raw_down(window, key);
+            const bool hit = down && !prev;
+            prev = down;
+            return hit;
+        };
+        const bool space_down = platform::key_raw_down(window, GLFW_KEY_SPACE);
+        const bool space_hit = space_down && !prev_space_down;
         prev_space_down = space_down;
+        const bool left_hit = edge(GLFW_KEY_LEFT, prev_left_down);
+        const bool right_hit = edge(GLFW_KEY_RIGHT, prev_right_down);
+        const bool home_hit = edge(GLFW_KEY_HOME, prev_home_down);
+        const bool end_hit = edge(GLFW_KEY_END, prev_end_down);
+        const bool i_hit = edge(GLFW_KEY_I, prev_i_down);
+        const bool o_hit = edge(GLFW_KEY_O, prev_o_down);
 
-        // Drag-and-drop: the first image opens the target, later ones join the
-        // identity library (matching the Zig GUI).
-        if (ui.input.dropped_count > 0 && !app->busy()) {
-            for (int i = 0; i < ui.input.dropped_count; ++i) {
-                const char* path = ui.input.dropped_files[i];
-                if (!path || !*path) continue;
-                if (!app->base.valid()) {
-                    app->openTarget(path);
-                    state->sync_output_path = true;
-                } else {
-                    app->addIdentityFile(path);
+        if (state->mode == AppMode::Video && video->isOpen() && ui.input.focused_id == 0) {
+            const int64_t step = ui.input.key_shift ? 10 : 1;
+            if (space_hit) video->togglePlayback();
+            if (left_hit) video->stepBy(-step);
+            if (right_hit) video->stepBy(step);
+            if (home_hit) video->seekTo(video->in_frame);
+            if (end_hit) video->seekTo(video->out_frame);
+            if (i_hit) {
+                video->in_frame = video->cur;
+                if (video->out_frame < video->in_frame) video->out_frame = video->in_frame;
+            }
+            if (o_hit) {
+                video->out_frame = video->cur;
+                if (video->in_frame > video->out_frame) video->in_frame = video->out_frame;
+            }
+        }
+
+        // Drag-and-drop: a video (or any drop in the video workspace) opens the
+        // video editor; otherwise the first image opens the target and later
+        // ones join the identity library.
+        if (ui.input.dropped_count > 0) {
+            const char* first = ui.input.dropped_files[0];
+            if (first && *first && (state->mode == AppMode::Video || is_video_path(first))) {
+                state->mode = AppMode::Video;
+                video->openPath(first);
+                std::snprintf(state->video_path, sizeof(state->video_path), "%s", first);
+            } else if (!app->busy()) {
+                for (int i = 0; i < ui.input.dropped_count; ++i) {
+                    const char* path = ui.input.dropped_files[i];
+                    if (!path || !*path) continue;
+                    if (!app->base.valid()) {
+                        app->openTarget(path);
+                        state->sync_output_path = true;
+                    } else {
+                        app->addIdentityFile(path);
+                    }
                 }
             }
         }
 
-        // Advance the worker and publish anything it finished this frame.
+        // Advance the workers and publish anything they finished this frame.
         app->poll();
+        video->poll();
         sync_textures(backend, *app, *state);
+        sync_video_textures(backend, *video, *state);
+        if (video->testDone()) platform::set_should_close(window);
 
         int fb_w = 0, fb_h = 0;
         int win_w = 0, win_h = 0;
@@ -553,7 +669,7 @@ int main(int argc, char** argv) {
         ui_ms_total += (platform::time_seconds() - ui_start) * 1000.0;
         ++ui_frames;
 
-        const bool idle_ok = !options.wait_idle || !app->busy();
+        const bool idle_ok = !options.wait_idle || (!app->busy() && !video->active());
         if (options.screenshot && frame + 1 >= options.frames && idle_ok) {
             if (backend.save_screenshot_ppm(options.screenshot)) {
                 std::printf("screenshot: %s\n", options.screenshot);
@@ -573,7 +689,9 @@ int main(int argc, char** argv) {
                 ui_frames > 0 ? ui_ms_total / ui_frames : 0.0, ui_frames);
 
     if (app->config_dirty) app->saveConfig();
+    video->close();
     destroy_textures(backend, *state);
+    delete video;
     delete app;
     frame_arena.destroy();
     state_arena.destroy();

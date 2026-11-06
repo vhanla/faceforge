@@ -66,6 +66,23 @@ bool Image::save(const char* path) const {
     return ff_image_save(path, data, width, height, stride) == FF_OK;
 }
 
+Image Image::resizeRegion(int32_t x, int32_t y, int32_t w, int32_t h, int32_t nw, int32_t nh,
+                          std::string* err) const {
+    if (!data) {
+        setErr(err, "could not resize image region");
+        return {};
+    }
+    const size_t off = static_cast<size_t>(y) * static_cast<size_t>(stride) +
+                       static_cast<size_t>(x) * 3u;
+    uint8_t* out = nullptr;
+    int32_t out_stride = 0;
+    if (ff_image_resize(data + off, w, h, stride, nw, nh, &out, &out_stride) != FF_OK || !out) {
+        setErr(err, "could not resize image region");
+        return {};
+    }
+    return Image::fromOwned(out, nw, nh);
+}
+
 bool Image::encodePng(std::vector<uint8_t>& out) const {
     uint8_t* out_data = nullptr;
     int32_t size = 0;

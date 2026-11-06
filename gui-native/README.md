@@ -27,16 +27,20 @@ original build file.
 The app layer is deliberately UI-agnostic and mirrors `gui/src/*.zig`: it owns
 the engine, the pristine base image, the identity library, the per-face swap
 patch cache, the composed result and the undo/redo history, and runs all
-inference on one background thread. The FaceForge screen
-(`app/ui_faceforge.*`) lives outside the vendored tree so it can call
-`app::App` directly and `amuie/` stays pristine.
+inference on one background thread. The video workspace lives in `app::Video`
+(`app/video.*`): it owns the timeline, analysis data, frame caches, project
+file and export jobs, borrowing the engine and identity library from
+`app::App`; photo and video jobs never run at the same time. The FaceForge
+screen (`app/ui_faceforge.*`) lives outside the vendored tree so it can call the
+app layer directly and `amuie/` stays pristine.
 
 ## Entry point
 
-`app/spike_main.cpp` builds `app::App` and the screen, then runs the frame loop.
-Beyond rendering, it owns texture lifetime: it uploads and destroys the base,
-result, face-thumbnail and identity-thumbnail textures as the app's dirty flags
-and generations change.
+`app/spike_main.cpp` builds `app::App`, `app::Video` and the screen, then runs
+the frame loop. Beyond rendering, it owns texture lifetime: it uploads and
+destroys the base, result, face-thumbnail, identity-thumbnail and video-frame
+textures as the app's dirty flags and generations change. It also feeds the
+video shortcuts (Space, Left/Right, Home/End, I/O) and drag-and-drop.
 
 ### Build and run
 
@@ -56,14 +60,19 @@ resolve:
 # headless capture (writes a PPM; convert with ImageMagick if needed):
 ./build-native/faceforge-spike --screenshot /tmp/spike.ppm --frames 5 --wait
 ./build-native/faceforge-spike --identity assets/source_messi.jpg
-./build-native/faceforge-spike --target assets/target_t1.jpg --video
+# video workspace, optionally opening a clip:
+./build-native/faceforge-spike --video [PATH]
 ```
 
 `--help` lists the full flag set: `--target`, `--identity` (repeatable or a
 `;`-separated list), `--models`, `--temp-dir`, `--export-dir`, `--provider`,
 `--config`, `--no-config`, `--save`, `--screenshot`, `--frames`, `--wait`,
-`--size WxH`, `--light` and `--video`. `FACEFORGE_TARGET` and
-`FACEFORGE_IDENTITY` provide the same inputs for scripted runs.
+`--size WxH`, `--light` and `--video [PATH]`. `FACEFORGE_TARGET`,
+`FACEFORGE_IDENTITY` and `FACEFORGE_VIDEO` provide the same inputs for scripted
+runs; `FACEFORGE_VIDEOTEST=clip.mp4` runs the scripted analysis/process/export/
+playback check (`FACEFORGE_VIDEOTEST_KEEP=1` keeps the window up afterwards).
+Without `--identity` or `FACEFORGE_IDENTITY`, `assets/source_lena.jpg` is the
+default identity, matching the Zig GUI.
 
 Note that `ui_text_edit` edits an app-owned buffer in place, so a widget pass
 must run each frame for the field to keep its focus, caret and selection. This
@@ -94,6 +103,7 @@ Editable text, slider and input plumbing:
   `poll_events()`.
 - `widgets/ui_widgets.*`: `ui_text_edit()` (UTF-8, selection, Ctrl+A/C/V/X,
   caret blink, horizontal scroll, per-id focus) and `ui_slider()`.
-- `app/ui_faceforge.*`: the Output and video path fields are editable.
+- `app/ui_faceforge.*`: the Output field and the Settings model directory are
+  editable.
 
 Keep `amuie/` and upstream in sync by hand when re-vendoring.
