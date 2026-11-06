@@ -21,7 +21,6 @@ add_library(amuie STATIC
     "${AMUIE_DIR}/platform/input.cpp"
     "${AMUIE_DIR}/backend/opengl3_backend.cpp"
     "${AMUIE_DIR}/assets/font_atlas.cpp"
-    "${AMUIE_DIR}/demo/faceforge.cpp"
 )
 target_include_directories(amuie PUBLIC "${AMUIE_DIR}")
 target_link_libraries(amuie PUBLIC glfw)
@@ -76,10 +75,23 @@ if(NOT MSVC)
     target_compile_options(faceforge-app PRIVATE -Wall -Wextra)
 endif()
 
+# ---- FaceForge screen (AMUIE widgets bound to the app layer) ----------------
+# The FaceForge screen is app-specific, so it lives outside the vendored library
+# and calls app::App directly. It is a separate static library so the entry
+# point only links the screen, not the whole app internals.
+add_library(faceforge-ui STATIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/app/ui_faceforge.cpp"
+)
+target_include_directories(faceforge-ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/app")
+target_link_libraries(faceforge-ui PUBLIC amuie faceforge-app)
+if(NOT MSVC)
+    target_compile_options(faceforge-ui PRIVATE -Wall -Wextra)
+endif()
+
 # ---- Spike executable ------------------------------------------------------
 add_executable(faceforge-spike "${CMAKE_CURRENT_SOURCE_DIR}/app/spike_main.cpp")
 target_include_directories(faceforge-spike PRIVATE "${FACEFORGE_ROOT}/core/include")
-target_link_libraries(faceforge-spike PRIVATE amuie faceforge-app "${FACEFORGE_LIB}")
+target_link_libraries(faceforge-spike PRIVATE faceforge-ui "${FACEFORGE_LIB}")
 
 # Resolve the core and ONNX Runtime from the build tree.
 set(_ff_rpath "${FACEFORGE_ROOT}/build;${FACEFORGE_ROOT}/third_party/onnxruntime/lib")

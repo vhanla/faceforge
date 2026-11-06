@@ -2,9 +2,16 @@
 
 #include <GLFW/glfw3.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#include <commdlg.h>
+#endif
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <string>
 
 namespace platform {
 
@@ -328,6 +335,136 @@ const char* platform_name() {
         case GLFW_PLATFORM_X11: return "X11";
         default: return "unknown";
     }
+}
+
+// ---- Native file choosers --------------------------------------------------
+
+namespace {
+
+#if defined(_WIN32)
+std::string win_filter(const char* filter) {
+    // Comdlg32 wants "Label\0pattern\0...\0\0"; derive a single Images group
+    // from the space-separated globs.
+    std::string globs = filter && *filter ? filter : "*.*";
+    for (char& c : globs) {
+        if (c == ' ') c = ';';
+    }
+    std::string out = "Images (";
+    std::string pretty;
+    for (char c : globs) pretty.push_back(c == ';' ? ' ' : c);
+    out += pretty;
+    out += ")\0";
+    out += globs;
+    out.push_back('\0');
+    out += "All files (*.*)\0*.*\0";
+    out.push_back('\0');
+    return out;
+}
+
+std::string win_dialog(bool save, const char* title, const char* filter,
+                       const char* initial_path, const char* default_name) {
+    char file[MAX_PATH] = {0};
+    if (initial_path && *initial_path) {
+        std::snprintf(file, sizeof(file), "%s", initial_path);
+    } else if (save && default_name && *default_name) {
+        std::snprintf(file, sizeof(file), "%s", default_name);
+    }
+    const std::string filt = win_filter(filter);
+
+    OPENFILENAMEA ofn;
+    std::memset(&ofn, 0, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = nullptr;
+    ofn.lpstrFilter = filt.c_str();
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = sizeof(file);
+    ofn.lpstrTitle = title;
+    ofn.Flags = OFN_NOCHANGEDIR | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
+
+    const BOOL ok = save ? GetSaveFileNameA(&ofn) : GetOpenFileNameA(&ofn);
+    return ok ? std::string(file) : std::string();
+}
+#else
+std::string shq(const char* s) {
+    std::string out = "'";
+    for (const char* p = s; p && *p; ++p) {
+        if (*p == '\'') out += "'\\''";
+        else out.push_back(*p);
+    }
+    out.push_back('\'');
+    return out;
+}
+
+bool run_capture(const std::string& cmd, std::string& out) {
+    FILE* p = popen(cmd.c_str(), "r");
+    if (!p) return false;
+    char buf[1024];
+    out.clear();
+    while (std::fgets(buf, sizeof(buf), p)) out += buf;
+    const int rc = pclose(p);
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+    return rc == 0 && !out.empty();
+}
+
+bool have_cmd(const char* name) {
+    std::string c = "command -v ";
+    c += name;
+    c += " >/dev/null 2>&1";
+    return std::system(c.c_str()) == 0;
+}
+
+std::string kdialog_filter(const char* filter) {
+    // kdialog: "Images (*.png *.jpg)"
+    std::string globs = filter && *filter ? filter : "*";
+    return "Images (" + globs + ")";
+}
+
+std::string unix_dialog(bool save, const char* title, const char* filter,
+                        const char* initial_path, const char* default_name) {
+    std::string start = initial_path && *initial_path ? initial_path
+                        : (default_name ? default_name : "");
+    std::string out;
+    if (have_cmd("zenity")) {
+        std::string cmd = "zenity --file-selection";
+        if (save) cmd += " --save --confirm-overwrite";
+        if (title && *title) cmd += " --title=" + shq(title);
+        if (!start.empty()) cmd += " --filename=" + shq(start.c_str());
+        if (filter && *filter) {
+            cmd += " --file-filter=" + shq((std::string("Images | ") + filter).c_str());
+        }
+        if (run_capture(cmd, out)) return out;
+        return {};
+    }
+    if (have_cmd("kdialog")) {
+        std::string cmd = "kdialog ";
+        cmd += save ? "--getsavefilename " : "--getopenfilename ";
+        cmd += shq(start.empty() ? "." : start.c_str());
+        cmd += " " + shq(kdialog_filter(filter).c_str());
+        if (title && *title) cmd += " --title " + shq(title);
+        if (run_capture(cmd, out)) return out;
+    }
+    return {};
+}
+#endif
+
+} // namespace
+
+std::string open_file_dialog(const char* title, const char* filter,
+                             const char* initial_path) {
+#if defined(_WIN32)
+    return win_dialog(false, title, filter, initial_path, nullptr);
+#else
+    return unix_dialog(false, title, filter, initial_path, nullptr);
+#endif
+}
+
+std::string save_file_dialog(const char* title, const char* filter,
+                             const char* initial_path, const char* default_name) {
+#if defined(_WIN32)
+    return win_dialog(true, title, filter, initial_path, default_name);
+#else
+    return unix_dialog(true, title, filter, initial_path, default_name);
+#endif
 }
 
 } // namespace platform

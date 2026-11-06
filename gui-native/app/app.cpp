@@ -202,7 +202,10 @@ void App::addIdentityImage(ff::Image&& img, const std::string& label) {
 void App::removeIdentity(int index) {
     if (busy()) return;
     if (index < 0 || index >= static_cast<int>(identities.size())) return;
-    identities.erase(identities.begin() + index);
+    {
+        std::lock_guard<std::mutex> lk(ident_mu_);
+        identities.erase(identities.begin() + index);
+    }
     if (default_identity >= static_cast<int>(identities.size())) default_identity = 0;
     identity_gen++;
     spawnJob(JobKind::ProcessAll, -1);
@@ -210,7 +213,10 @@ void App::removeIdentity(int index) {
 
 void App::clearIdentities() {
     if (busy()) return;
-    identities.clear();
+    {
+        std::lock_guard<std::mutex> lk(ident_mu_);
+        identities.clear();
+    }
     default_identity = 0;
     identity_gen++;
     clearPatches();
@@ -337,6 +343,21 @@ void App::applyResultAsInput() {
     face_count = 0;
     if (!busy()) spawnJob(JobKind::ReloadTarget, -1);
     setStatus("Result applied as input", false);
+}
+
+void App::clearTarget() {
+    if (busy()) return;
+    base.reset();
+    base_gen++;
+    base_dirty = true;
+    clearResult();
+    clearPatches();
+    freeProc();
+    face_count = 0;
+    undo.clear();
+    redo.clear();
+    target_path.clear();
+    setStatus("Canvas cleared", false);
 }
 
 void App::undoHistory() {
@@ -510,6 +531,17 @@ FacesSnapshot App::facesSnapshot() const {
     return s;
 }
 
+IdentitiesSnapshot App::identitiesSnapshot() const {
+    IdentitiesSnapshot s;
+    std::lock_guard<std::mutex> lk(ident_mu_);
+    const int n = std::min(static_cast<int>(identities.size()), kMaxIdentities);
+    s.count = n;
+    s.default_identity = default_identity;
+    s.gen = identity_gen;
+    for (int i = 0; i < n; ++i) s.labels[i] = identities[static_cast<size_t>(i)].label;
+    return s;
+}
+
 // ---- worker ----------------------------------------------------------------
 
 void App::spawnJob(JobKind kind, int arg) {
@@ -636,6 +668,8 @@ void App::poll() {
     if (ok) {
         takePendingResult();
         buildFaceThumbs();
+        timings_published = timings;
+        if (!provider_name.empty()) provider_published = provider_name;
         stage_value_.store(static_cast<uint32_t>(Stage::Done), std::memory_order_relaxed);
         progress_value_.store(1000, std::memory_order_relaxed);
         setStatus("Ready", false);
@@ -740,7 +774,10 @@ bool App::drainPendingIdentities(bool* added) {
             char buf[96];
             std::snprintf(buf, sizeof(buf), "%s #%d", p.label.c_str(), k);
             id.label = buf;
-            identities.push_back(std::move(id));
+            {
+                std::lock_guard<std::mutex> lk(ident_mu_);
+                identities.push_back(std::move(id));
+            }
             *added = true;
         }
     }

@@ -1,4 +1,16 @@
-#include "demo/faceforge.hpp"
+// FaceForge native screen (see ui_faceforge.hpp).
+//
+// This began as the AMUIE demo mockup and is now the real application screen:
+// the photo workspace is driven by the UI-agnostic app layer (app::App), while
+// the video workspace is still the design mockup and will be wired in a later
+// phase. The draw pass never blocks on inference: app::App runs jobs on its own
+// worker thread and publishes status, faces and the composed result, which this
+// file reads through thread-safe snapshots.
+
+#include "ui_faceforge.hpp"
+
+#include "platform/window.hpp"
+
 #include "core/font.hpp"
 #include "core/theme.hpp"
 #include "widgets/ui_widgets.hpp"
@@ -8,6 +20,8 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 
 namespace {
 
@@ -28,6 +42,7 @@ char* arena_fmt(Arena* a, const char* fmt, ...) {
     va_end(args);
     return buf;
 }
+
 
 // Icon codepoints baked by tools/gen_assets.py.
 enum Icon : uint32_t {
@@ -120,7 +135,7 @@ struct Layout {
     bool show_right = true;
 };
 
-inline Layout compute_layout(const UIContext* ctx, const DemoState* state) {
+inline Layout compute_layout(const UIContext* ctx, const UIState* state) {
     Layout L;
     L.w = ctx->screen_w > 0.0f ? ctx->screen_w : kDesignW;
     L.h = ctx->screen_h > 0.0f ? ctx->screen_h : kDesignH;
@@ -177,20 +192,20 @@ bool pill(Arena* a, UIContext* ctx, const Theme& t, Rect r, const char* label,
     return inter.clicked;
 }
 
+app::App* app_of(UIState* state) { return state->app; }
+
 // ---------------------------------------------------------------------------
 // 1. Navigation Rail (Collapsible Sidebar Menu)
 // ---------------------------------------------------------------------------
-void nav_sidebar(Arena* a, UIContext* ctx, DemoState* state, float rail_w) {
+void nav_sidebar(Arena* a, UIContext* ctx, UIState* state, float rail_w) {
     const Theme& t = *ctx->theme;
     const float H = ctx->screen_h;
     const float status_h = 26.0f;
     const float rail_h = H - 64.0f - status_h;
 
-    // Navigation rail background panel
     ui_rect(a, ctx, Rect{0, 64, rail_w, rail_h}, t.bg_header);
     ui_separator(a, ctx, rail_w - 1.0f, 64, 1.0f, color_alpha(t.border, 0xc0));
 
-    // Collapse / Expand toggle button at top
     const Rect toggle_r = state->sidebar_expanded
                               ? Rect{rail_w - 42.0f, 72.0f, 34.0f, 32.0f}
                               : Rect{9.0f, 72.0f, 36.0f, 32.0f};
@@ -198,7 +213,6 @@ void nav_sidebar(Arena* a, UIContext* ctx, DemoState* state, float rail_w) {
         state->sidebar_expanded = !state->sidebar_expanded;
     }
 
-    // Rail menu items (Photo, Video, Settings, About)
     auto draw_rail_item = [&](float y, uint32_t icon, const char* label, bool active) -> bool {
         const Rect r = state->sidebar_expanded
                            ? Rect{8.0f, y, rail_w - 16.0f, 40.0f}
@@ -224,7 +238,6 @@ void nav_sidebar(Arena* a, UIContext* ctx, DemoState* state, float rail_w) {
         return in.clicked;
     };
 
-    // Mode buttons topmost aligned:
     if (draw_rail_item(116.0f, ICON_PHOTO, "Photo", state->mode == AppMode::Photo)) {
         state->mode = AppMode::Photo;
     }
@@ -232,22 +245,23 @@ void nav_sidebar(Arena* a, UIContext* ctx, DemoState* state, float rail_w) {
         state->mode = AppMode::Video;
     }
 
-    // Utility buttons most bottom aligned:
     const float bot_y = 64.0f + rail_h - 10.0f;
     ui_separator(a, ctx, 8.0f, bot_y - 94.0f, rail_w - 16.0f, color_alpha(t.border, 0x80));
 
     if (draw_rail_item(bot_y - 84.0f, ICON_SETTINGS_FILLED, "Settings", state->show_settings)) {
         state->show_settings = !state->show_settings;
+        if (state->show_settings) state->show_about = false;
     }
     if (draw_rail_item(bot_y - 40.0f, ICON_INFO, "About", state->show_about)) {
         state->show_about = !state->show_about;
+        if (state->show_about) state->show_settings = false;
     }
 }
 
 // ---------------------------------------------------------------------------
 // 2. Header
 // ---------------------------------------------------------------------------
-void header(Arena* a, UIContext* ctx, DemoState* state) {
+void header(Arena* a, UIContext* ctx, UIState* state) {
     const Theme& t = *ctx->theme;
     const float W = ctx->screen_w;
     ui_rect(a, ctx, Rect{0, 0, W, 64}, t.bg_header);
@@ -258,7 +272,6 @@ void header(Arena* a, UIContext* ctx, DemoState* state) {
     ui_text_bold(a, ctx, 67.0f, 18.0f, "FaceForge", t.text, 15.0f);
     ui_text(a, ctx, 152.0f, 21.0f, "restore \xC2\xB7 swap \xC2\xB7 enhance", t.text_dim, 12.0f);
 
-    // Window controls pinned to the right edge
     const Rect btn_close{W - 48.0f, 15, 32, 28};
     const Rect btn_max{W - 108.0f, 15, 32, 28};
     const Rect btn_min{W - 168.0f, 15, 32, 28};
@@ -279,7 +292,7 @@ void header(Arena* a, UIContext* ctx, DemoState* state) {
 // ---------------------------------------------------------------------------
 // 3. Top Toolbar
 // ---------------------------------------------------------------------------
-void toolbar(Arena* a, UIContext* ctx, DemoState* state, float rail_w) {
+void toolbar(Arena* a, UIContext* ctx, UIState* state, float rail_w) {
     const Theme& t = *ctx->theme;
     const float W = ctx->screen_w;
     const float tool_w = W - rail_w;
@@ -289,34 +302,69 @@ void toolbar(Arena* a, UIContext* ctx, DemoState* state, float rail_w) {
     ui_rect(a, ctx, Rect{rail_w, 121, tool_w, 1}, Color{0x1a, 0x1c, 0x21, 0xff});
     ui_rect(a, ctx, Rect{rail_w, 122, tool_w, 2}, Color{0x12, 0x13, 0x17, 0xff});
 
+    app::App* app = app_of(state);
+    const bool busy = app && app->busy();
+
     const float start_x = rail_w + 14.0f;
     float cur_x = start_x;
 
-    // Trailing toolbar buttons drop as the window narrows instead of clipping.
     static const char* kPhotoLabels[] = {"Open target...", "Paste target",
                                          "Add identity...", "Paste identity"};
     static const char* kVideoLabels[] = {"Open video...", "Paste video",
                                          "Add identity...", "Paste identity"};
     static const float kToolbarW[] = {114.0f, 106.0f, 114.0f, 112.0f};
-    const char* const* labels = (state->mode == AppMode::Photo) ? kPhotoLabels : kVideoLabels;
+    const bool video = state->mode == AppMode::Video;
+    const char* const* labels = video ? kVideoLabels : kPhotoLabels;
     const float right_limit = W - 20.0f;
     for (int i = 0; i < 4; ++i) {
         if (cur_x + kToolbarW[i] > right_limit) break;
-        toolbar_text_button(a, ctx, Rect{cur_x, 74, kToolbarW[i], 40}, labels[i]);
+        const Rect r{cur_x, 74, kToolbarW[i], 40};
+        if (toolbar_text_button(a, ctx, r, labels[i])) {
+            if (!app) {
+            } else if (video) {
+                // Video pipeline is not wired yet.
+            } else if (i == 0) {
+                const std::string p = platform::open_file_dialog(
+                    "Open target image",
+                    "*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff",
+                    app->target_path.c_str());
+                if (!p.empty()) {
+                    app->openTarget(p);
+                    state->sync_output_path = true;
+                }
+            } else if (i == 1) {
+                app->setStatus("Clipboard image paste is not supported yet", true);
+            } else if (i == 2) {
+                const std::string p = platform::open_file_dialog(
+                    "Add identity image",
+                    "*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff", "");
+                if (!p.empty()) app->addIdentityFile(p);
+            } else {
+                app->setStatus("Clipboard image paste is not supported yet", true);
+            }
+        }
         cur_x += kToolbarW[i] + 8.0f;
     }
 
-    // Right-pinned VRAM readout
     const Rect readout{W - 200.0f, 74, 180, 40};
     if (readout.x >= cur_x + 130.0f) {
-        ui_text_right(a, ctx, readout, "VRAM 1.9/4.0 GB \xC2\xB7 RSS 1.2 GB", t.text_dim, 12.0f);
+        const char* txt;
+        if (app && !app->providerName().empty()) {
+            txt = arena_fmt(a, "Engine %s", app->providerName().c_str());
+        } else if (busy && app) {
+            txt = arena_fmt(a, "%s %d%%", app::stageText(app->stage()),
+                            app->progressPermille() / 10);
+        } else {
+            txt = "Engine idle";
+        }
+        ui_text_right(a, ctx, readout, txt, t.text_dim, 12.0f);
     }
 }
 
 // ---------------------------------------------------------------------------
 // 4. Photo Mode: Left Sidebar, Center Canvas, Right Sidebar
 // ---------------------------------------------------------------------------
-void photo_left_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layout& L) {
+void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& L) {
     const Theme& t = *ctx->theme;
     const float H = ctx->screen_h;
     const float x = L.left_x;
@@ -327,9 +375,13 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layout
     ui_rect(a, ctx, Rect{x, view_y, w, view_bottom - view_y}, t.bg_panel);
     ui_separator(a, ctx, x + w - 0.5f, view_y, 1.0f, t.border);
 
+    app::App* app = app_of(state);
+    app::IdentitiesSnapshot ids;
+    if (app) ids = app->identitiesSnapshot();
+
     const float footer_h = 68.0f;
     const float scroll_view_bottom = view_bottom - footer_h;
-    const float content_bottom = 890.0f;
+    const float content_bottom = 900.0f;
     const float max_scroll = std::max(0.0f, content_bottom - (scroll_view_bottom - view_y));
     state->left_scroll = std::clamp(state->left_scroll, 0.0f, max_scroll);
     const float oy = view_y + 12.0f - state->left_scroll;
@@ -338,8 +390,38 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layout
 
     // Identities
     section_header(a, ctx, t, x, oy, ICON_USER_FILLED, "Identities");
-    ui_text(a, ctx, x + 21.0f, oy + 36.0f, "No identities yet.", t.text, 14.4f);
-    ui_text(a, ctx, x + 21.0f, oy + 61.0f, "Add a face photo to swap.", t.text_dim, 13.5f);
+    if (ids.count == 0) {
+        ui_text(a, ctx, x + 21.0f, oy + 36.0f, "No identities yet.", t.text, 14.4f);
+        ui_text(a, ctx, x + 21.0f, oy + 61.0f, "Add a face photo to swap.", t.text_dim, 13.5f);
+    } else {
+        // Up to five identity chips; the default gets an accent ring.
+        const float chip = 44.0f;
+        const float gap = 7.0f;
+        const int max_chips = 5;
+        for (int i = 0; i < ids.count && i < max_chips; ++i) {
+            const Rect cr{x + 21.0f + static_cast<float>(i) * (chip + gap), oy + 34.0f, chip, chip};
+            const uint64_t cid = ui_hash_int(static_cast<uint64_t>(i), 0x1d3e);
+            const UIInteraction in = ui_process_interaction(ctx, cid, cr);
+            if (state->identity_tex[i] != 0) {
+                ui_image(a, ctx, cr, state->identity_tex[i], Color{0xff, 0xff, 0xff, 0xff});
+            } else {
+                ui_rect(a, ctx, cr, t.bg_raised, 6.0f);
+                ui_icon_center(a, ctx, cr, ICON_USER_FILLED, t.text_muted, 20.0f);
+            }
+            const bool is_default = i == ids.default_identity;
+            const Color ring = is_default ? t.accent
+                                          : (in.hovered ? t.text_muted : color_alpha(t.border, 0xc0));
+            ui_rect_border(a, ctx, cr, ring, 6.0f, is_default ? 2.5f : 1.0f);
+            if (in.clicked && app) app->selectDefaultIdentity(i);
+        }
+        if (ids.count > max_chips) {
+            ui_text(a, ctx, x + 21.0f + static_cast<float>(max_chips) * (chip + gap), oy + 48.0f,
+                    arena_fmt(a, "+%d", ids.count - max_chips), t.text_dim, 13.0f);
+        }
+        const int di = std::clamp(ids.default_identity, 0, ids.count - 1);
+        ui_text(a, ctx, x + 21.0f, oy + 82.0f,
+                arena_fmt(a, "Default: %s", ids.labels[di].c_str()), t.text_dim, 12.5f);
+    }
 
     const Rect ident_area{x + 21.0f, oy + 30.0f, 245.0f, 105.0f};
     const uint64_t ident_menu_id = ui_hash_str("identities_ctx_menu");
@@ -351,84 +433,173 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layout
         { .separator = true },
         { .label = "Clear all", .icon = ICON_TRASH }
     };
-    ui_context_menu(a, ctx, ident_menu_id, kIdentMenuItems, 4, &t);
+    const int ident_pick = ui_context_menu(a, ctx, ident_menu_id, kIdentMenuItems, 4, &t);
+    if (app) {
+        if (ident_pick == 0) {
+            const std::string p = platform::open_file_dialog(
+                "Add identity image", "*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff", "");
+            if (!p.empty()) app->addIdentityFile(p);
+        } else if (ident_pick == 1) {
+            app->setStatus("Clipboard image paste is not supported yet", true);
+        } else if (ident_pick == 3) {
+            app->clearIdentities();
+        }
+    }
 
-    ui_button_icon_text(a, ctx, Rect{x + 21.0f, oy + 92.0f, 133.0f, 42.0f}, ICON_PLUS, "Add...",
-                        t.accent_dim, 8.0f, 18.0f, 14.0f, true);
-    ui_button_icon_text(a, ctx, Rect{x + 163.0f, oy + 92.0f, 103.0f, 42.0f}, ICON_TRASH, "Clear",
-                        t.bg_control, 8.0f, 18.0f, 13.5f, true, tone_control_text(t));
+    if (ui_button_icon_text(a, ctx, Rect{x + 21.0f, oy + 100.0f, 133.0f, 42.0f}, ICON_PLUS, "Add...",
+                            t.accent_dim, 8.0f, 18.0f, 14.0f, true)) {
+        if (app) {
+            const std::string p = platform::open_file_dialog(
+                "Add identity image", "*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff", "");
+            if (!p.empty()) app->addIdentityFile(p);
+        }
+    }
+    if (ui_button_icon_text(a, ctx, Rect{x + 163.0f, oy + 100.0f, 103.0f, 42.0f}, ICON_TRASH, "Clear",
+                            t.bg_control, 8.0f, 18.0f, 13.5f, true, tone_control_text(t))) {
+        if (app) app->clearIdentities();
+    }
 
     // Quality
-    float qy = oy + 160.0f;
+    float qy = oy + 168.0f;
     section_header(a, ctx, t, x, qy, ICON_SLIDERS_FILLED, "Quality");
     ui_text(a, ctx, x + 22.0f, qy + 38.0f, "Enhancer", t.text, 13.5f, 2);
 
     static const char* kEnhancers[] = {
+        "None",
         "GFPGAN 1.4",
-        "CodeFormer",
-        "RestoreFormer",
-        "GPEN-BFR-512"
+        "Real-ESRGAN x2",
+        "Real-ESRGAN x4"
     };
     const Rect combo{x + 109.0f, qy + 32.0f, 157.0f, 32.0f};
-    ui_combo(a, ctx, combo, kEnhancers, 4, &state->enhancer_index, &t);
+    int enhancer_index = app ? static_cast<int>(app->enhancer) : 0;
+    if (ui_combo(a, ctx, combo, kEnhancers, 4, &enhancer_index, &t)) {
+        if (app) {
+            app->enhancer = static_cast<app::Enhancer>(enhancer_index);
+            app->processAll();
+        }
+    }
 
-    ui_checkbox(a, ctx, x + 24.0f, qy + 75.0f, "Restore mouths from original", &state->restore_mouths, &t);
-    ui_checkbox(a, ctx, x + 24.0f, qy + 103.0f, "Fast preview (downscaled)", &state->fast_preview, &t);
-    ui_checkbox(a, ctx, x + 24.0f, qy + 131.0f, "Unload models between runs", &state->unload_models, &t);
+    bool restore = app ? app->restore_mouth : true;
+    bool fast = app ? app->fast_preview : true;
+    bool unload = app ? app->unload_after_run : false;
+    ui_checkbox(a, ctx, x + 24.0f, qy + 75.0f, "Restore mouths from original", &restore, &t);
+    ui_checkbox(a, ctx, x + 24.0f, qy + 103.0f, "Fast preview (downscaled)", &fast, &t);
+    ui_checkbox(a, ctx, x + 24.0f, qy + 131.0f, "Unload models between runs", &unload, &t);
+    if (app) {
+        if (restore != app->restore_mouth) { app->restore_mouth = restore; app->processAll(); }
+        if (fast != app->fast_preview) { app->fast_preview = fast; app->processAll(); }
+        if (unload != app->unload_after_run) { app->unload_after_run = unload; app->markConfigDirty(); }
+    }
 
     // History
     float hy = qy + 180.0f;
     section_header(a, ctx, t, x, hy, ICON_HISTORY_FILLED, "History");
-    ui_button_icon_text(a, ctx, Rect{x + 21.0f, hy + 29.0f, 245.0f, 36.0f}, 0, "Apply as input",
-                        t.bg_control, 7.0f, 0.0f, 14.0f, true, tone_control_text(t));
-    ui_button_icon_text(a, ctx, Rect{x + 21.0f, hy + 70.0f, 116.0f, 36.0f}, ICON_UNDO, "Undo",
-                        t.bg_control, 7.0f, 13.0f, 13.5f, true, tone_control_text(t), Color{}, 7.0f);
-    ui_button_icon_text(a, ctx, Rect{x + 149.0f, hy + 70.0f, 117.0f, 36.0f}, ICON_REDO, "Redo",
-                        t.bg_control, 7.0f, 13.0f, 13.5f, true, tone_control_text(t), Color{}, 7.0f);
-    ui_text(a, ctx, x + 21.0f, hy + 113.0f, "undo 0 \xC2\xB7 redo 0", t.text_dim, 14.5f);
+    if (ui_button_icon_text(a, ctx, Rect{x + 21.0f, hy + 29.0f, 245.0f, 36.0f}, 0, "Apply as input",
+                            t.bg_control, 7.0f, 0.0f, 14.0f, true, tone_control_text(t))) {
+        if (app) app->applyResultAsInput();
+    }
+    if (ui_button_icon_text(a, ctx, Rect{x + 21.0f, hy + 70.0f, 116.0f, 36.0f}, ICON_UNDO, "Undo",
+                            t.bg_control, 7.0f, 13.0f, 13.5f, true, tone_control_text(t), Color{}, 7.0f)) {
+        if (app) app->undoHistory();
+    }
+    if (ui_button_icon_text(a, ctx, Rect{x + 149.0f, hy + 70.0f, 117.0f, 36.0f}, ICON_REDO, "Redo",
+                            t.bg_control, 7.0f, 13.0f, 13.5f, true, tone_control_text(t), Color{}, 7.0f)) {
+        if (app) app->redoHistory();
+    }
+    ui_text(a, ctx, x + 21.0f, hy + 113.0f,
+            arena_fmt(a, "undo %d \xC2\xB7 redo %d", app ? app->undoCount() : 0,
+                      app ? app->redoCount() : 0),
+            t.text_dim, 14.5f);
 
     ui_separator(a, ctx, x + 16.0f, hy + 146.0f, 250.0f, color_alpha(t.border, 0xb0));
 
     // Studio
     float sy = hy + 160.0f;
     section_header(a, ctx, t, x, sy, ICON_BOX_FILLED, "Studio");
-    ui_rect(a, ctx, Rect{x + 21.0f, sy + 28.0f, 245.0f, 36.0f}, t.bg_control, 7.0f);
-    ui_text_center(a, ctx, Rect{x + 21.0f, sy + 28.0f, 245.0f, 36.0f}, "Open Studio", tone_control_text(t), 14.0f, 1);
-    ui_icon(a, ctx, x + 242.0f, sy + 38.0f, ICON_EXTERNAL, t.text_muted, 16.0f);
+    if (ui_button_icon_text(a, ctx, Rect{x + 21.0f, sy + 28.0f, 245.0f, 36.0f}, ICON_EXTERNAL, "Open Studio",
+                            t.bg_control, 7.0f, 16.0f, 14.0f, true, tone_control_text(t))) {
+        if (app) app->setStatus("Studio is not wired in the native UI yet", true);
+    }
     ui_text(a, ctx, x + 21.0f, sy + 70.0f, "Paint the original back over the result.", t.text_muted, 13.0f);
     ui_text(a, ctx, x + 21.0f, sy + 87.0f, "Erase added hair, blemishes, halos...", t.text_dim, 13.0f);
 
     // Output
     float oy2 = sy + 120.0f;
     section_header(a, ctx, t, x, oy2, ICON_FOLDER_FILLED, "Output");
-    ui_text_edit(a, ctx, Rect{x + 21.0f, oy2 + 26.0f, 213.0f, 32.0f}, state->output_path,
-                 sizeof(state->output_path), &t);
+    const UITextEditResult ed = ui_text_edit(a, ctx, Rect{x + 21.0f, oy2 + 26.0f, 213.0f, 32.0f},
+                                             state->output_path, sizeof(state->output_path), &t,
+                                             "output.png", 0x0f01);
+    if (app && (ed == UITextEditResult::Changed || ed == UITextEditResult::Submitted)) {
+        app->save_path = state->output_path;
+        app->save_explicit = true;
+    }
     const Rect fld_r{x + 234.0f, oy2 + 26.0f, 32.0f, 32.0f};
-    ui_rect(a, ctx, fld_r, t.bg_control, 6.0f);
-    ui_icon_center(a, ctx, fld_r, ICON_FOLDER_FILLED, t.text, 20.0f);
+    if (ui_icon_button(a, ctx, fld_r, ICON_FOLDER_FILLED, t.text, t.bg_control_hover, 6.0f, 20.0f)) {
+        if (app) {
+            const std::string p = platform::save_file_dialog(
+                "Choose output file", "*.png *.jpg *.jpeg *.webp *.bmp",
+                state->output_path, "output.png");
+            if (!p.empty()) {
+                std::snprintf(state->output_path, sizeof(state->output_path), "%s", p.c_str());
+                app->save_path = p;
+                app->save_explicit = true;
+            }
+        }
+    }
 
-    ui_button_icon_text(a, ctx, Rect{x + 21.0f, oy2 + 69.0f, 141.0f, 37.0f}, ICON_SAVE, "Save as...",
-                        t.bg_control, 7.0f, 18.0f, 14.0f, true, tone_control_text(t));
-    ui_button_icon_text(a, ctx, Rect{x + 173.0f, oy2 + 69.0f, 93.0f, 37.0f}, ICON_COPY, "Copy",
-                        t.bg_control, 7.0f, 18.0f, 14.0f, true, tone_control_text(t));
-    ui_button_icon_text(a, ctx, Rect{x + 21.0f, oy2 + 112.0f, 149.0f, 38.0f}, ICON_PLAY_FILLED, "Process all",
-                        t.bg_control, 7.0f, 18.0f, 14.0f, true, tone_control_text(t), t.accent);
-    ui_button_icon_text(a, ctx, Rect{x + 182.0f, oy2 + 112.0f, 84.0f, 38.0f}, ICON_TRASH, "Clear",
-                        t.bg_control, 7.0f, 18.0f, 14.0f, true, tone_control_text(t));
+    if (ui_button_icon_text(a, ctx, Rect{x + 21.0f, oy2 + 69.0f, 141.0f, 37.0f}, ICON_SAVE, "Save as...",
+                            t.bg_control, 7.0f, 18.0f, 14.0f, true, tone_control_text(t))) {
+        if (app) {
+            const std::string p = platform::save_file_dialog(
+                "Save result image", "*.png *.jpg *.jpeg *.webp *.bmp",
+                state->output_path, "output.png");
+            if (!p.empty()) {
+                std::snprintf(state->output_path, sizeof(state->output_path), "%s", p.c_str());
+                app->save_path = p;
+                app->save_explicit = true;
+                app->saveResult(p);
+            }
+        }
+    }
+    if (ui_button_icon_text(a, ctx, Rect{x + 173.0f, oy2 + 69.0f, 93.0f, 37.0f}, ICON_COPY, "Copy",
+                            t.bg_control, 7.0f, 18.0f, 14.0f, true, tone_control_text(t))) {
+        if (app) app->copyResult();
+    }
+    if (ui_button_icon_text(a, ctx, Rect{x + 21.0f, oy2 + 112.0f, 149.0f, 38.0f}, ICON_PLAY_FILLED, "Process all",
+                            t.bg_control, 7.0f, 18.0f, 14.0f, true, tone_control_text(t), t.accent)) {
+        if (app) app->processAll();
+    }
+    if (ui_button_icon_text(a, ctx, Rect{x + 182.0f, oy2 + 112.0f, 84.0f, 38.0f}, ICON_TRASH, "Clear",
+                            t.bg_control, 7.0f, 18.0f, 14.0f, true, tone_control_text(t))) {
+        if (app) app->clearTarget();
+    }
 
     // Pinned footer
     ui_clip(a, ctx, Rect{0, 0, ctx->screen_w, H});
     ui_rect(a, ctx, Rect{x, scroll_view_bottom, w, footer_h}, t.bg_panel);
     ui_separator(a, ctx, x, scroll_view_bottom, w, color_alpha(t.border, 0x90));
 
-    ui_rect(a, ctx, Rect{x + 20.0f, scroll_view_bottom + 16.0f, 16.0f, 16.0f}, t.accent, 8.0f);
-    ui_rect(a, ctx, Rect{x + 26.5f, scroll_view_bottom + 19.5f, 3.0f, 3.0f}, t.on_accent, 1.5f);
-    ui_rect(a, ctx, Rect{x + 26.5f, scroll_view_bottom + 24.0f, 3.0f, 5.5f}, t.on_accent, 1.5f);
-    ui_text(a, ctx, x + 44.0f, scroll_view_bottom + 16.0f, "Load a target image first", t.text_muted, 13.5f);
+    const bool have_target = app && app->base.valid();
+    const Color dot = have_target ? t.accent : t.text_muted;
+    ui_rect(a, ctx, Rect{x + 20.0f, scroll_view_bottom + 16.0f, 16.0f, 16.0f}, dot, 8.0f);
+    if (have_target) {
+        ui_icon(a, ctx, x + 22.0f, scroll_view_bottom + 18.0f, ICON_CHECK, t.on_accent, 12.0f);
+    } else {
+        ui_rect(a, ctx, Rect{x + 26.5f, scroll_view_bottom + 19.5f, 3.0f, 3.0f}, t.on_accent, 1.5f);
+        ui_rect(a, ctx, Rect{x + 26.5f, scroll_view_bottom + 24.0f, 3.0f, 5.5f}, t.on_accent, 1.5f);
+    }
+    if (have_target) {
+        ui_text(a, ctx, x + 44.0f, scroll_view_bottom + 16.0f,
+                ui_text_ellipsized(a, app ? app->target_path.c_str() : "", 13.5f, 2, w - 64.0f),
+                t.text_muted, 13.5f);
+    } else {
+        ui_text(a, ctx, x + 44.0f, scroll_view_bottom + 16.0f, "Load a target image first", t.text_muted, 13.5f);
+    }
 }
 
-void photo_center_panel(Arena* a, UIContext* ctx, DemoState* state, const Layout& L) {
+void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& L) {
     const Theme& t = *ctx->theme;
+    app::App* app = app_of(state);
     const float dx = L.canvas_x - (L.left_x + L.left_w + 10.0f);
     const float row_right = L.canvas_x + L.canvas_w;
     auto row_fits = [&](float px, float pw) { return px + pw <= row_right + 0.5f; };
@@ -454,7 +625,9 @@ void photo_center_panel(Arena* a, UIContext* ctx, DemoState* state, const Layout
         }
     }
     if (row_fits(L.canvas_x + 300.0f, 70.0f)) {
-        ui_text(a, ctx, L.canvas_x + 300.0f, top_ctrl_y + 8.0f, "zoom 100%", t.text, 13.9f, 2);
+        ui_text(a, ctx, L.canvas_x + 300.0f, top_ctrl_y + 8.0f,
+                arena_fmt(a, "zoom %d%%", static_cast<int>(state->zoom * 100.0f)),
+                t.text, 13.9f, 2);
     }
     if (L.canvas_w >= 850.0f) {
         ui_text(a, ctx, L.canvas_x + 400.0f + dx, top_ctrl_y + 9.0f,
@@ -465,7 +638,6 @@ void photo_center_panel(Arena* a, UIContext* ctx, DemoState* state, const Layout
     const Rect canvas{L.canvas_x, L.canvas_y, L.canvas_w, L.canvas_h};
     ui_dashed_rect(a, ctx, canvas, color_alpha(t.border, 0xd0), 5.0f, 4.0f);
 
-    // Canvas context menu
     const uint64_t canvas_menu_id = ui_hash_str("canvas_ctx_menu");
     ui_context_menu_area(ctx, canvas_menu_id, canvas);
 
@@ -479,28 +651,69 @@ void photo_center_panel(Arena* a, UIContext* ctx, DemoState* state, const Layout
         { .label = "Clear Canvas", .icon = ICON_TRASH }
     };
     const int menu_pick = ui_context_menu(a, ctx, canvas_menu_id, kCanvasMenuItems, 7, &t);
-    if (menu_pick == 3) {
+    if (menu_pick == 1) {
+        if (app) {
+            const std::string p = platform::open_file_dialog(
+                "Open target image", "*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff",
+                app->target_path.c_str());
+            if (!p.empty()) {
+                app->openTarget(p);
+                state->sync_output_path = true;
+            }
+        }
+    } else if (menu_pick == 3) {
         state->fit = true;
         state->zoom = 1.0f;
     } else if (menu_pick == 4) {
         state->fit = false;
         state->zoom = 1.0f;
+    } else if (menu_pick == 6) {
+        if (app) app->clearTarget();
     }
 
-    // When a canvas texture is set, draw it contain-fit and skip the empty
-    // state. This is the path the FaceForge spike exercises with a real image.
-    if (state->canvas_tex != 0 && state->canvas_tex_w > 0 && state->canvas_tex_h > 0) {
+    // Image canvas. The composed result is shown by default; "Original" swaps in
+    // the pristine base, and the base is also used as a fallback until the first
+    // job produces a result. The rect is sized from the base image so the face
+    // overlay (stored in base pixels) maps correctly even at preview resolution.
+    const bool have_base = app && app->base.valid();
+    const bool show_original = state->original || state->result_tex == 0;
+    const uint64_t tex = show_original ? state->base_tex : state->result_tex;
+    if (tex != 0 && have_base) {
+        const float ref_w = static_cast<float>(app->base.width);
+        const float ref_h = static_cast<float>(app->base.height);
         const float pad = 8.0f;
         const float avail_w = canvas.w - pad * 2.0f;
         const float avail_h = canvas.h - pad * 2.0f;
-        const float scale = std::min(avail_w / static_cast<float>(state->canvas_tex_w),
-                                     avail_h / static_cast<float>(state->canvas_tex_h));
-        const float iw = static_cast<float>(state->canvas_tex_w) * scale;
-        const float ih = static_cast<float>(state->canvas_tex_h) * scale;
+        float scale = std::min(avail_w / ref_w, avail_h / ref_h);
+        if (!state->fit) scale = state->zoom;
+        const float iw = ref_w * scale;
+        const float ih = ref_h * scale;
         const Rect dst{canvas.x + (canvas.w - iw) * 0.5f,
                        canvas.y + (canvas.h - ih) * 0.5f, iw, ih};
-        ui_image(a, ctx, dst, state->canvas_tex, Color{0xff, 0xff, 0xff, 0xff});
+        ui_image(a, ctx, dst, tex, Color{0xff, 0xff, 0xff, 0xff});
         ui_rect_border(a, ctx, dst, t.border, 4.0f, 1.0f);
+
+        // Face overlay + click-to-toggle. Faces are stored in base pixels.
+        if (state->overlay && !show_original && app) {
+            app::FacesSnapshot snap = app->facesSnapshot();
+            for (int i = 0; i < snap.count; ++i) {
+                const float bx = dst.x + snap.faces[i].bbox[0] * scale;
+                const float by = dst.y + snap.faces[i].bbox[1] * scale;
+                const float bw = (snap.faces[i].bbox[2] - snap.faces[i].bbox[0]) * scale;
+                const float bh = (snap.faces[i].bbox[3] - snap.faces[i].bbox[1]) * scale;
+                const Rect fr{bx, by, bw, bh};
+                const Color box_col = snap.sel[i] ? Color{0x34, 0xd3, 0x99, 0xff}
+                                                  : Color{0x8b, 0x95, 0xa5, 0xff};
+                ui_rect_border(a, ctx, fr, box_col, 3.0f, 2.0f);
+                const uint64_t fid = ui_hash_int(static_cast<uint64_t>(i), 0xf00d);
+                const UIInteraction fin = ui_process_interaction(ctx, fid, fr);
+                if (fin.clicked) app->toggleFace(i);
+                const Rect badge{fr.x, fr.y - 18.0f, 66.0f, 16.0f};
+                ui_rect(a, ctx, badge, Color{0x0f, 0x17, 0x2a, 0xe0}, 3.0f);
+                ui_text(a, ctx, badge.x + 6.0f, badge.y + 2.0f,
+                        arena_fmt(a, "Face %d", i + 1), box_col, 10.5f, 2);
+            }
+        }
         return;
     }
 
@@ -540,12 +753,37 @@ void photo_center_panel(Arena* a, UIContext* ctx, DemoState* state, const Layout
     }
 }
 
-void photo_right_sidebar(Arena* a, UIContext* ctx, const Layout& L) {
+// Builds the combo item labels for a face row: Default, each identity, Skip.
+void face_combo_items(Arena* a, const app::IdentitiesSnapshot& ids,
+                      std::vector<const char*>& items, std::vector<std::string>& storage) {
+    storage.clear();
+    items.clear();
+    storage.reserve(static_cast<size_t>(ids.count) + 2);
+    storage.push_back("Default");
+    items.push_back(storage.back().c_str());
+    for (int i = 0; i < ids.count; ++i) {
+        storage.push_back(ids.labels[i]);
+        items.push_back(storage.back().c_str());
+    }
+    storage.push_back("Skip face");
+    items.push_back(storage.back().c_str());
+    (void)a;
+}
+
+void photo_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& L) {
     if (!L.show_right) return;
     const Theme& t = *ctx->theme;
     const float H = ctx->screen_h;
     const float rx = L.right_x;
     const float w = L.right_w;
+
+    app::App* app = app_of(state);
+    app::FacesSnapshot snap;
+    app::IdentitiesSnapshot ids;
+    if (app) {
+        snap = app->facesSnapshot();
+        ids = app->identitiesSnapshot();
+    }
 
     const float stats_h = 225.0f;
     const float stats_y = H - L.status_h - 16.0f - stats_h;
@@ -561,15 +799,84 @@ void photo_right_sidebar(Arena* a, UIContext* ctx, const Layout& L) {
     ui_icon(a, ctx, rx + 17.0f, card_y + 17.0f, ICON_SCAN_FACE_FILLED, t.accent, 22.0f);
     ui_text_bold(a, ctx, rx + 38.0f, card_y + 15.0f, "Detected faces", t.text, 17.5f);
 
-    pill(a, ctx, t, Rect{rx + 15.0f, card_y + 60.0f, 70.0f, 37.0f}, "All", true);
-    pill(a, ctx, t, Rect{rx + 93.0f, card_y + 60.0f, 70.0f, 37.0f}, "None", false);
-    ui_text_right(a, ctx, Rect{rx + 173.0f, card_y + 60.0f, 67.0f, 37.0f}, "0 found", t.text, 14.2f, 1);
+    if (pill(a, ctx, t, Rect{rx + 15.0f, card_y + 60.0f, 70.0f, 37.0f}, "All",
+             snap.count > 0 && [&] {
+                 for (int i = 0; i < snap.count; ++i) if (!snap.sel[i]) return false;
+                 return true;
+             }())) {
+        if (app) for (int i = 0; i < snap.count; ++i) app->setFaceSelected(i, true);
+    }
+    if (pill(a, ctx, t, Rect{rx + 93.0f, card_y + 60.0f, 70.0f, 37.0f}, "None",
+             snap.count > 0 && [&] {
+                 for (int i = 0; i < snap.count; ++i) if (snap.sel[i]) return false;
+                 return true;
+             }())) {
+        if (app) for (int i = 0; i < snap.count; ++i) app->setFaceSelected(i, false);
+    }
+    ui_text_right(a, ctx, Rect{rx + 173.0f, card_y + 60.0f, 67.0f, 37.0f},
+                  arena_fmt(a, "%d found", snap.count), t.text, 14.2f, 1);
 
-    const float list_cy = inner_y + inner_h * 0.5f;
-    ui_icon_center(a, ctx, Rect{rx + 101.0f, list_cy - 59.0f, 58.0f, 58.0f},
-                   ICON_SCAN_PERSON, Color{0x8b, 0x95, 0xa5, 0xff}, 58.0f);
-    ui_text_center(a, ctx, Rect{rx, list_cy + 8.0f, w, 26.0f}, "No faces detected yet.",
-                   t.text_muted, 14.3f);
+    // Face list (scroll is approximated by clipping the inner card).
+    ui_clip(a, ctx, Rect{rx + 4.0f, inner_y, w - 8.0f, inner_h});
+    if (snap.count == 0) {
+        const float list_cy = inner_y + inner_h * 0.5f;
+        ui_icon_center(a, ctx, Rect{rx + 101.0f, list_cy - 59.0f, 58.0f, 58.0f},
+                       ICON_SCAN_PERSON, Color{0x8b, 0x95, 0xa5, 0xff}, 58.0f);
+        ui_text_center(a, ctx, Rect{rx, list_cy + 8.0f, w, 26.0f}, "No faces detected yet.",
+                       t.text_muted, 14.3f);
+    } else {
+        std::vector<const char*> items;
+        std::vector<std::string> storage;
+        face_combo_items(a, ids, items, storage);
+        float ry = inner_y + 8.0f;
+        const float row_h = 52.0f;
+        for (int i = 0; i < snap.count && ry + row_h <= inner_y + inner_h; ++i) {
+            const Rect row{rx + 8.0f, ry, w - 16.0f, row_h - 6.0f};
+            const uint64_t rid = ui_hash_int(static_cast<uint64_t>(i), 0xface);
+            const UIInteraction rin = ui_process_interaction(ctx, rid, row);
+            const Color rbg = snap.sel[i] ? color_alpha(t.accent, 0x30)
+                                          : (rin.hovered ? t.bg_control_hover : Color{0, 0, 0, 0});
+            if (rbg.a > 0) ui_rect(a, ctx, row, rbg, 6.0f);
+
+            const Rect th{row.x + 3.0f, row.y + 3.0f, 38.0f, 38.0f};
+            if (state->face_tex[i] != 0) {
+                ui_image(a, ctx, th, state->face_tex[i], Color{0xff, 0xff, 0xff, 0xff});
+            } else {
+                ui_rect(a, ctx, th, t.bg_raised, 4.0f);
+                ui_icon_center(a, ctx, th, ICON_USER_FILLED, t.text_muted, 16.0f);
+            }
+            ui_rect_border(a, ctx, th, snap.sel[i] ? t.accent : t.border, 4.0f,
+                           snap.sel[i] ? 2.0f : 1.0f);
+            ui_text_bold(a, ctx, row.x + 48.0f, row.y + 5.0f,
+                         arena_fmt(a, "Face %d", i + 1), t.text, 12.5f);
+
+            const Rect cr{row.x + 92.0f, row.y + 9.0f, row.w - 96.0f, 26.0f};
+            int sel_idx;
+            if (!snap.sel[i]) sel_idx = ids.count + 1;
+            else if (snap.identity[i] >= 0 && snap.identity[i] < ids.count) sel_idx = snap.identity[i] + 1;
+            else sel_idx = 0;
+            if (ui_combo(a, ctx, cr, items.data(), static_cast<int>(items.size()), &sel_idx, &t,
+                         ui_hash_int(static_cast<uint64_t>(i), 0xc0b0))) {
+                if (app) {
+                    if (sel_idx == ids.count + 1) {
+                        app->setFaceSelected(i, false);
+                    } else if (sel_idx == 0) {
+                        app->setFaceSelected(i, true);
+                        app->setFaceIdentity(i, -1);
+                    } else {
+                        app->setFaceSelected(i, true);
+                        app->setFaceIdentity(i, sel_idx - 1);
+                    }
+                }
+            }
+
+            // Clicking the row body (not the combo/thumb border) toggles it.
+            if (rin.clicked && !ui_hovered(ctx, cr) && app) app->toggleFace(i);
+            ry += row_h;
+        }
+    }
+    // Restore full-screen clip for the statistics card below.
+    ui_clip(a, ctx, Rect{0, 0, ctx->screen_w, ctx->screen_h});
 
     // Statistics
     ui_panel(a, ctx, Rect{rx, stats_y, w, stats_h}, t.bg_panel, t.border, 10.0f);
@@ -577,22 +884,27 @@ void photo_right_sidebar(Arena* a, UIContext* ctx, const Layout& L) {
     ui_text_bold(a, ctx, rx + 48.0f, stats_y + 18.0f, "Statistics", t.text, 15.0f);
 
     const char* labels[] = {"detect", "embed", "swap", "enhance", "total"};
+    const app::Timings tm = app ? app->lastTimings() : app::Timings{};
+    const double vals[] = {tm.detect_ms, tm.embed_ms, tm.swap_ms, tm.enhance_ms, tm.total_ms};
     const Color stat_label = color_mix(t.text, t.text_muted, 0.35f);
     for (int i = 0; i < 5; ++i) {
         const float y = stats_y + 51.0f + static_cast<float>(i) * 25.0f;
         ui_text_in_rect(a, ctx, Rect{rx + 19.0f, y, 160.0f, 22.0f}, labels[i],
                         stat_label, 13.5f, 2);
-        ui_text_right(a, ctx, Rect{rx + 17.0f, y, 160.0f, 22.0f}, "0.0 ms", t.text, 13.5f, 2);
+        ui_text_right(a, ctx, Rect{rx + 17.0f, y, 160.0f, 22.0f},
+                      arena_fmt(a, "%.1f ms", vals[i]), t.text, 13.5f, 2);
     }
 
     ui_separator(a, ctx, rx + 17.0f, stats_y + 181.0f, 160.0f, color_alpha(t.border, 0xa0));
-    ui_text_bold(a, ctx, rx + 17.0f, stats_y + 185.0f, "fast preview", t.accent, 14.1f);
+    ui_text_bold(a, ctx, rx + 17.0f, stats_y + 185.0f,
+                 (app && app->fast_preview) ? "fast preview" : "full resolution",
+                 t.accent, 14.1f);
 }
 
 // ---------------------------------------------------------------------------
 // 5. Video Mode: Left Sidebar, Center Canvas & Scrubber, Right Sidebar
 // ---------------------------------------------------------------------------
-void video_left_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layout& L) {
+void video_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& L) {
     const Theme& t = *ctx->theme;
     const float H = ctx->screen_h;
     const float x = L.left_x;
@@ -610,23 +922,21 @@ void video_left_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layout
 
     ui_clip(a, ctx, Rect{x, view_y, w, view_bottom - view_y});
 
-    // 1. Video file card
     const Rect file_card{x + 10.0f, oy, w - 20.0f, 72.0f};
     ui_rect(a, ctx, file_card, t.bg_raised, 6.0f);
     ui_rect_border(a, ctx, file_card, t.border, 6.0f, 1.0f);
 
     ui_text_bold(a, ctx, file_card.x + 10.0f, file_card.y + 8.0f,
-                 "2c893f20-1e44-4f97-8d14...", t.text, 13.0f);
+                 "No video loaded", t.text, 13.0f);
     ui_button_icon_text(a, ctx, Rect{file_card.x + file_card.w - 52.0f, file_card.y + 6.0f, 44.0f, 22.0f},
                         0, "Close", t.bg_control, 4.0f, 0.0f, 11.5f, false, t.text_muted);
     ui_text(a, ctx, file_card.x + 10.0f, file_card.y + 29.0f,
-            "768x1024 \xC2\xB7 24.00 fps \xC2\xB7 Indexed", t.text_muted, 12.0f);
+            "Video workspace is not wired yet.", t.text_muted, 12.0f);
     ui_text(a, ctx, file_card.x + 10.0f, file_card.y + 48.0f,
-            "121 frames \xC2\xB7 +0:+5.+42", t.text_dim, 12.0f);
+            "Photo mode is fully functional.", t.text_dim, 12.0f);
 
     float cur_y = oy + 84.0f;
 
-    // 2. Analysis range
     section_header(a, ctx, t, x, cur_y, ICON_CHART_BARS, "Analysis range");
     cur_y += 32.0f;
 
@@ -646,7 +956,7 @@ void video_left_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layout
 
     ui_text(a, ctx, x + 16.0f, cur_y, "Chunk 300 \xC2\xB7 Sample every 1", t.text_muted, 12.0f);
     cur_y += 18.0f;
-    ui_progress(a, ctx, Rect{x + 14.0f, cur_y, w - 28.0f, 6.0f}, 1.0f, t.bg_control, t.accent);
+    ui_progress(a, ctx, Rect{x + 14.0f, cur_y, w - 28.0f, 6.0f}, 0.0f, t.bg_control, t.accent);
     cur_y += 14.0f;
 
     ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 110.0f, 30.0f}, 0, "Analyze range",
@@ -656,74 +966,28 @@ void video_left_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layout
     ui_button_icon_text(a, ctx, Rect{x + 198.0f, cur_y, 56.0f, 30.0f}, 0, "Clear",
                         t.bg_control, 6.0f, 0.0f, 12.0f, false, tone_control_text(t));
     cur_y += 36.0f;
-    ui_text(a, ctx, x + 16.0f, cur_y, "121 samples \xC2\xB7 1/1 chunks analyzed", t.text_dim, 12.0f);
+    ui_text(a, ctx, x + 16.0f, cur_y, "No analysis yet", t.text_dim, 12.0f);
     cur_y += 24.0f;
 
     ui_separator(a, ctx, x + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
-    // 3. Sequences
     section_header(a, ctx, t, x, cur_y, ICON_HISTORY_FILLED, "Sequences");
     cur_y += 28.0f;
     ui_text(a, ctx, x + 16.0f, cur_y, "Grouped by face count and position.", t.text_muted, 12.0f);
     cur_y += 20.0f;
 
-    const Rect seq_row{x + 12.0f, cur_y, w - 24.0f, 34.0f};
-    ui_rect(a, ctx, seq_row, t.accent, 6.0f);
-    ui_text_bold(a, ctx, seq_row.x + 10.0f, seq_row.y + 8.0f, "#1  0-120", t.on_accent, 13.5f);
-    ui_text_right(a, ctx, Rect{seq_row.x, seq_row.y, seq_row.w - 12.0f, seq_row.h}, "1 face(s)", t.on_accent, 13.0f, 1);
-    cur_y += 42.0f;
-
     ui_separator(a, ctx, x + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
-    // 4. Assign identities
     section_header(a, ctx, t, x, cur_y, ICON_USER_FILLED, "Assign identities");
     cur_y += 28.0f;
-    ui_text(a, ctx, x + 16.0f, cur_y, "Sequence 0-120 \xC2\xB7 1 face(s)", t.text_muted, 12.0f);
+    ui_text(a, ctx, x + 16.0f, cur_y, "Load a video to analyze faces.", t.text_muted, 12.0f);
     cur_y += 22.0f;
-
-    const Rect map_card{x + 12.0f, cur_y, w - 24.0f, 48.0f};
-    ui_rect(a, ctx, map_card, t.bg_raised, 6.0f);
-    ui_rect_border(a, ctx, map_card, t.border, 6.0f, 1.0f);
-
-    ui_rect(a, ctx, Rect{map_card.x + 6.0f, map_card.y + 6.0f, 36.0f, 36.0f}, Color{0x1b, 0x3d, 0x2e, 0xff}, 4.0f);
-    ui_rect_border(a, ctx, Rect{map_card.x + 6.0f, map_card.y + 6.0f, 36.0f, 36.0f}, Color{0x34, 0xd3, 0x99, 0xff}, 4.0f, 1.5f);
-    ui_icon(a, ctx, map_card.x + 16.0f, map_card.y + 16.0f, ICON_USER, Color{0x34, 0xd3, 0x99, 0xff}, 16.0f);
-
-    ui_text(a, ctx, map_card.x + 48.0f, map_card.y + 16.0f, "Face 1", Color{0x34, 0xd3, 0x99, 0xff}, 12.5f, 2);
-
-    static const char* kIdModels[] = { "image.webp #0", "target2.png #1", "Skip face" };
-    const Rect id_combo{map_card.x + 94.0f, map_card.y + 8.0f, map_card.w - 142.0f, 32.0f};
-    ui_combo(a, ctx, id_combo, kIdModels, 3, &state->identity_model_index, &t);
-
-    ui_rect(a, ctx, Rect{map_card.x + map_card.w - 40.0f, map_card.y + 6.0f, 36.0f, 36.0f}, t.accent_dim, 4.0f);
-    ui_icon(a, ctx, map_card.x + map_card.w - 30.0f, map_card.y + 16.0f, ICON_USER_FILLED, t.on_accent, 16.0f);
-    cur_y += 56.0f;
-
-    ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, (w - 28.0f) * 0.5f, 28.0f}, 0, "All faces: default",
-                        t.bg_control, 5.0f, 0.0f, 12.0f, false, tone_control_text(t));
-    ui_button_icon_text(a, ctx, Rect{x + 16.0f + (w - 28.0f) * 0.5f, cur_y, (w - 28.0f) * 0.5f, 28.0f}, 0, "All faces: skip",
-                        t.bg_control, 5.0f, 0.0f, 12.0f, false, tone_control_text(t));
-    cur_y += 34.0f;
-
-    const float btn3_w = (w - 32.0f) / 3.0f;
-    ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, btn3_w, 28.0f}, 0, "Apply",
-                        t.bg_control, 5.0f, 0.0f, 12.0f, false, tone_control_text(t));
-    ui_button_icon_text(a, ctx, Rect{x + 16.0f + btn3_w, cur_y, btn3_w, 28.0f}, 0, "Forward",
-                        t.bg_control, 5.0f, 0.0f, 12.0f, false, tone_control_text(t));
-    ui_button_icon_text(a, ctx, Rect{x + 20.0f + btn3_w * 2.0f, cur_y, btn3_w, 28.0f}, 0, "This frame",
-                        t.bg_control, 5.0f, 0.0f, 12.0f, false, tone_control_text(t));
-    cur_y += 34.0f;
-
-    ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, w - 24.0f, 28.0f}, 0, "Clear frame override",
-                        t.bg_control, 5.0f, 0.0f, 12.0f, false, tone_control_text(t));
-    cur_y += 36.0f;
 
     ui_separator(a, ctx, x + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
-    // 5. Studio (per-frame retouch)
     section_header(a, ctx, t, x, cur_y, ICON_BOX_FILLED, "Studio (per-frame retouch)");
     cur_y += 30.0f;
     ui_checkbox(a, ctx, x + 16.0f, cur_y, "Paint retouch on this frame", &state->vid_paint_retouch, &t);
@@ -732,7 +996,6 @@ void video_left_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layout
     ui_separator(a, ctx, x + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
-    // 6. Process & cache
     section_header(a, ctx, t, x, cur_y, ICON_SLIDERS_FILLED, "Process & cache");
     cur_y += 30.0f;
 
@@ -760,7 +1023,6 @@ void video_left_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layout
     ui_separator(a, ctx, x + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
-    // 7. Export
     section_header(a, ctx, t, x, cur_y, ICON_SAVE, "Export");
     cur_y += 30.0f;
     ui_checkbox(a, ctx, x + 16.0f, cur_y, "Audio", &state->vid_audio, &t);
@@ -775,65 +1037,39 @@ void video_left_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layout
 
     ui_text(a, ctx, x + 16.0f, cur_y, "Export always runs at the source resolution.", t.text_dim, 11.5f);
 
-    // Restore the full-screen clip so later layers are not cropped to this panel.
     ui_clip(a, ctx, Rect{0, 0, ctx->screen_w, ctx->screen_h});
 }
 
-void video_center_panel(Arena* a, UIContext* ctx, DemoState* state, const Layout& L) {
+void video_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& L) {
     const Theme& t = *ctx->theme;
     const float x = L.canvas_x;
     const float y = 124.0f;
     const float w = L.canvas_w;
     const float h = L.h - L.status_h - y;
 
-    // Dark cinema letterbox background
     ui_rect(a, ctx, Rect{x, y, w, h}, Color{0x0e, 0x10, 0x14, 0xff}, 8.0f);
     ui_rect_border(a, ctx, Rect{x, y, w, h}, t.border, 8.0f, 1.0f);
 
     const float transport_h = 82.0f;
     const float view_h = h - transport_h;
 
-    // Centered simulated video frame (portrait 3:4 aspect ratio)
     const float frame_h = std::min(view_h - 20.0f, 620.0f);
     const float frame_w = frame_h * 0.72f;
     const float frame_x = x + (w - frame_w) * 0.5f;
     const float frame_y = y + (view_h - frame_h) * 0.5f;
 
-    // Simulated frame background
     ui_rect(a, ctx, Rect{frame_x, frame_y, frame_w, frame_h}, Color{0x1e, 0x22, 0x2b, 0xff}, 4.0f);
-    ui_rect(a, ctx, Rect{frame_x, frame_y, frame_w, frame_h * 0.45f}, Color{0x4a, 0x5a, 0x6e, 0xff}, 4.0f);
-    ui_rect(a, ctx, Rect{frame_x, frame_y + frame_h * 0.45f, frame_w, frame_h * 0.55f}, Color{0x1b, 0x1f, 0x27, 0xff}, 0.0f);
+    ui_icon_center(a, ctx, Rect{frame_x, frame_y, frame_w, frame_h}, ICON_PLAY,
+                   Color{0x3a, 0x40, 0x4c, 0xff}, 64.0f);
 
-    // Simulated character portrait silhouette & lighting
-    const float char_cx = frame_x + frame_w * 0.5f;
-    const float char_head_y = frame_y + frame_h * 0.16f;
-    const float char_head_r = frame_w * 0.12f;
-    ui_rect(a, ctx, Rect{char_cx - char_head_r, char_head_y, char_head_r * 2.0f, char_head_r * 2.4f},
-            Color{0xd4, 0x98, 0x7c, 0xff}, char_head_r);
-    ui_rect(a, ctx, Rect{char_cx - char_head_r * 1.3f, char_head_y - 8.0f, char_head_r * 2.6f, char_head_r * 3.5f},
-            Color{0x99, 0x3d, 0x24, 0x90}, char_head_r * 0.8f);
-
-    // Green detected face bounding box (when opt_boxes is true)
-    if (state->opt_boxes) {
-        const Rect face_box{char_cx - char_head_r * 1.05f, char_head_y - 4.0f, char_head_r * 2.1f, char_head_r * 2.6f};
-        ui_rect_border(a, ctx, face_box, Color{0x34, 0xd3, 0x99, 0xff}, 3.0f, 1.5f);
-        const Rect badge{face_box.x, face_box.y - 18.0f, 92.0f, 16.0f};
-        ui_rect(a, ctx, badge, Color{0x0f, 0x17, 0x2a, 0xe0}, 3.0f);
-        ui_text(a, ctx, badge.x + 6.0f, badge.y + 2.0f, "Face 1 (98.4%)", Color{0x34, 0xd3, 0x99, 0xff}, 10.5f, 2);
-    }
-
-    // Pinned Video Transport & Scrubber Bar
     const Rect trans_r{x, y + view_h, w, transport_h};
     ui_rect(a, ctx, trans_r, t.bg_raised, 0.0f);
     ui_separator(a, ctx, trans_r.x, trans_r.y, trans_r.w, t.border);
 
-    // Row 1: Playback Buttons & Timecode
     const float row1_y = trans_r.y + 8.0f;
     const float btn_w = 34.0f;
     const float btn_h = 28.0f;
 
-    // Playback buttons. At very narrow canvas widths the cluster collapses to a
-    // single centered Play/Pause button so nothing spills past the panel.
     const bool compact = w < 240.0f;
     const char* play_lbl = state->is_playing ? "Pause" : "Play";
     const uint32_t play_icon = state->is_playing ? 0u : static_cast<uint32_t>(ICON_PLAY_FILLED);
@@ -868,8 +1104,6 @@ void video_center_panel(Arena* a, UIContext* ctx, DemoState* state, const Layout
         }
     }
 
-    // Checkboxes drop right-to-left as the canvas narrows, like the toolbar.
-    // Row 1 also holds the right-aligned timecode when there is room.
     const bool show_timecode = w >= 520.0f;
     const bool show_all_boxes = w >= 810.0f;
     const bool show_some_boxes = w >= 640.0f;
@@ -886,9 +1120,8 @@ void video_center_panel(Arena* a, UIContext* ctx, DemoState* state, const Layout
         }
     }
 
-    // Timecode readout
     if (show_timecode) {
-        const float cur_sec = state->current_frame / state->fps;
+        const float cur_sec = static_cast<float>(state->current_frame) / state->fps;
         const int tc_m = static_cast<int>(cur_sec) / 60;
         const int tc_s = static_cast<int>(cur_sec) % 60;
         const int tc_ms = static_cast<int>((cur_sec - static_cast<int>(cur_sec)) * 1000.0f);
@@ -898,7 +1131,6 @@ void video_center_panel(Arena* a, UIContext* ctx, DemoState* state, const Layout
                       t.text, 12.5f, 1);
     }
 
-    // Row 2: Dual-Lane Timeline Scrubber Track
     const Rect track_r{x + 14.0f, trans_r.y + 40.0f, w - 28.0f, 18.0f};
     ui_rect(a, ctx, track_r, Color{0x14, 0x16, 0x1c, 0xff}, 4.0f);
     ui_rect_border(a, ctx, track_r, t.border, 4.0f, 1.0f);
@@ -909,7 +1141,6 @@ void video_center_panel(Arena* a, UIContext* ctx, DemoState* state, const Layout
     ui_rect(a, ctx, Rect{in_x, track_r.y + 3.0f, cache_w, 5.0f}, Color{0x2b, 0x5b, 0xa3, 0xff}, 2.0f);
     ui_rect(a, ctx, Rect{in_x, track_r.y + 10.0f, cache_w, 5.0f}, Color{0x23, 0x4a, 0x85, 0xff}, 2.0f);
 
-    // In / Out bracket markers
     ui_rect(a, ctx, Rect{in_x, track_r.y, 2.0f, track_r.h}, Color{0x38, 0xbd, 0xf8, 0xff});
     ui_rect(a, ctx, Rect{in_x, track_r.y, 6.0f, 2.0f}, Color{0x38, 0xbd, 0xf8, 0xff});
     ui_rect(a, ctx, Rect{in_x, track_r.y + track_r.h - 2.0f, 6.0f, 2.0f}, Color{0x38, 0xbd, 0xf8, 0xff});
@@ -918,7 +1149,6 @@ void video_center_panel(Arena* a, UIContext* ctx, DemoState* state, const Layout
     ui_rect(a, ctx, Rect{out_x - 5.0f, track_r.y, 6.0f, 2.0f}, Color{0xfb, 0x92, 0x3c, 0xff});
     ui_rect(a, ctx, Rect{out_x - 5.0f, track_r.y + track_r.h - 2.0f, 6.0f, 2.0f}, Color{0xfb, 0x92, 0x3c, 0xff});
 
-    // Yellow Playhead Scrubber Line & Handle
     const float play_x = track_r.x + (static_cast<float>(state->current_frame) / state->total_frames) * track_r.w;
     ui_rect(a, ctx, Rect{play_x - 1.0f, track_r.y - 2.0f, 2.5f, track_r.h + 4.0f}, Color{0xfa, 0xcc, 0x15, 0xff});
     ui_rect(a, ctx, Rect{play_x - 3.5f, track_r.y - 3.0f, 7.0f, 4.0f}, Color{0xfa, 0xcc, 0x15, 0xff}, 1.5f);
@@ -930,16 +1160,10 @@ void video_center_panel(Arena* a, UIContext* ctx, DemoState* state, const Layout
         state->current_frame = std::clamp(static_cast<int>(norm * state->total_frames), 0, state->total_frames - 1);
     }
 
-    // Row 3: Sub-timeline info
-    ui_text(a, ctx, x + 16.0f, trans_r.y + 64.0f, "faces: 1:image.webp #0", Color{0x34, 0xd3, 0x99, 0xff}, 11.5f, 2);
-    if (w >= 760.0f) {
-        ui_text(a, ctx, x + 160.0f, trans_r.y + 64.0f,
-                "Loaded 2c893f20-1e44-4f97-8d14-648eb6644024_seed1174069481.mp4 and its project",
-                t.text_dim, 11.5f);
-    }
+    ui_text(a, ctx, x + 16.0f, trans_r.y + 64.0f, "No video loaded", t.text_dim, 11.5f);
 }
 
-void video_right_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layout& L) {
+void video_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& L) {
     if (!L.show_right) return;
     const Theme& t = *ctx->theme;
     const float rx = L.right_x;
@@ -952,7 +1176,6 @@ void video_right_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layou
 
     float cur_y = view_y + 12.0f;
 
-    // 1. Identity library card
     section_header(a, ctx, t, rx, cur_y, ICON_USER_FILLED, "Identity library");
     cur_y += 32.0f;
 
@@ -964,22 +1187,17 @@ void video_right_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layou
     ui_rect(a, ctx, av_r, t.accent_dim, 6.0f);
     ui_icon(a, ctx, av_r.x + 13.0f, av_r.y + 13.0f, ICON_USER_FILLED, t.on_accent, 20.0f);
 
-    ui_text_bold(a, ctx, lib_card.x + 62.0f, lib_card.y + 12.0f, "image.webp", t.text, 14.0f);
-    ui_text(a, ctx, lib_card.x + 62.0f, lib_card.y + 32.0f, "Active \xC2\xB7 Target #0", Color{0x34, 0xd3, 0x99, 0xff}, 12.0f, 2);
+    ui_text_bold(a, ctx, lib_card.x + 62.0f, lib_card.y + 12.0f, "No video loaded", t.text, 14.0f);
+    ui_text(a, ctx, lib_card.x + 62.0f, lib_card.y + 32.0f, "Video workspace pending", t.text_muted, 12.0f, 2);
     cur_y += 74.0f;
 
     ui_separator(a, ctx, rx + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
-    // 2. Cache card
     section_header(a, ctx, t, rx, cur_y, ICON_CLOCK, "Cache");
     cur_y += 30.0f;
-
-    ui_text(a, ctx, rx + 14.0f, cur_y,
-            arena_fmt(a, "frame %d: low \xE2\x80\x94 \xC2\xB7 high cached", state->current_frame),
-            t.text, 12.5f);
+    ui_text(a, ctx, rx + 14.0f, cur_y, "No cached frames.", t.text_muted, 12.5f);
     cur_y += 18.0f;
-    ui_text(a, ctx, rx + 14.0f, cur_y, "signature 84dc91ee", t.text_dim, 12.0f);
     cur_y += 24.0f;
 
     ui_button_icon_text(a, ctx, Rect{rx + 12.0f, cur_y, w - 24.0f, 30.0f}, 0, "Forget this frame's cache",
@@ -990,13 +1208,12 @@ void video_right_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layou
     cur_y += 36.0f;
 
     ui_text_edit(a, ctx, Rect{rx + 12.0f, cur_y, w - 24.0f, 28.0f}, state->video_path,
-                 sizeof(state->video_path), &t);
+                 sizeof(state->video_path), &t, "video path", 0x0f02);
     cur_y += 42.0f;
 
     ui_separator(a, ctx, rx + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
-    // 3. Shortcuts Card
     section_header(a, ctx, t, rx, cur_y, ICON_INFO, "Shortcuts");
     cur_y += 30.0f;
 
@@ -1011,17 +1228,12 @@ void video_right_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layou
     shortcut_row("Space", "Play / Pause");
     shortcut_row("< / >", "Step frame");
     shortcut_row("Shift", "Jump 10 frames");
-
-    cur_y += 6.0f;
-    ui_text(a, ctx, rx + 14.0f, cur_y, "Sequence plays only the selected sequence.", t.text_dim, 11.5f);
-    cur_y += 18.0f;
-    ui_text(a, ctx, rx + 14.0f, cur_y, "Analysis & processing run in background.", t.text_dim, 11.5f);
 }
 
 // ---------------------------------------------------------------------------
 // 6. Status Bar & Size Grip
 // ---------------------------------------------------------------------------
-void status_bar(Arena* a, UIContext* ctx, DemoState* state) {
+void status_bar(Arena* a, UIContext* ctx, UIState* state) {
     const Theme& t = *ctx->theme;
     const float W = ctx->screen_w;
     const float H = ctx->screen_h;
@@ -1031,32 +1243,29 @@ void status_bar(Arena* a, UIContext* ctx, DemoState* state) {
     ui_rect(a, ctx, bar, t.bg_header);
     ui_separator(a, ctx, 0.0f, bar.y, W, color_alpha(t.border, 0x90));
 
-    // Center mode indicator pill and right readout drop on narrow windows so the
-    // left status text is never overdrawn.
     const char* mode_badge = state->mode == AppMode::Photo ? "PHOTO MODE" : "VIDEO MODE";
     const float badge_w = text_width(mode_badge, 10.5f, 1) + 16.0f;
     const bool show_badge = W >= 700.0f;
     const bool show_right = W >= 940.0f;
 
-    // Left status text with status dot. Truncated so it never runs under the
-    // centered badge or the right-hand readout.
     float msg_max = W - 26.0f - 10.0f;
     if (show_badge) msg_max = std::min(msg_max, (W - badge_w) * 0.5f - 40.0f);
     if (show_right) msg_max = std::min(msg_max, W - 250.0f - 40.0f);
 
-    if (state->mode == AppMode::Photo) {
-        ui_rect(a, ctx, Rect{12.0f, bar.y + 9.0f, 8.0f, 8.0f}, Color{0x34, 0xd3, 0x99, 0xff}, 4.0f);
-        ui_text(a, ctx, 26.0f, bar.y + 6.0f,
-                ui_text_ellipsized(a, "Ready \xC2\xB7 FaceForge v2.4 \xC2\xB7 GPU active", 12.0f, 0, msg_max),
-                t.text_muted, 12.0f);
-    } else {
-        ui_rect(a, ctx, Rect{12.0f, bar.y + 9.0f, 8.0f, 8.0f}, Color{0x38, 0xbd, 0xf8, 0xff}, 4.0f);
-        char* vid_msg = arena_fmt(a,
-                      "faces: 1:image.webp #0 \xC2\xB7 2c893f20-1e44.mp4 \xC2\xB7 %d frames (%d fps) \xC2\xB7 %s",
-                      state->total_frames, static_cast<int>(state->fps), state->is_playing ? "Playing" : "Paused");
-        ui_text(a, ctx, 26.0f, bar.y + 6.0f,
-                ui_text_ellipsized(a, vid_msg, 12.0f, 0, msg_max), t.text_muted, 12.0f);
+    app::App* app = app_of(state);
+    const bool busy = app && app->busy();
+    const bool err = app && app->statusIsError();
+    const Color dot = busy ? t.accent : (err ? t.danger : Color{0x34, 0xd3, 0x99, 0xff});
+    ui_rect(a, ctx, Rect{12.0f, bar.y + 9.0f, 8.0f, 8.0f}, dot, 4.0f);
+
+    const char* msg = app ? app->statusText().c_str() : "Ready";
+    if (busy && app) {
+        msg = arena_fmt(a, "%s \xC2\xB7 %s \xC2\xB7 %d%%", app->statusText().c_str(),
+                        app::stageText(app->stage()), app->progressPermille() / 10);
     }
+    ui_text(a, ctx, 26.0f, bar.y + 6.0f,
+            ui_text_ellipsized(a, msg, 12.0f, 0, msg_max),
+            err ? t.danger : t.text_muted, 12.0f);
 
     if (show_badge) {
         const Rect badge_r{(W - badge_w) * 0.5f, bar.y + 4.0f, badge_w, 18.0f};
@@ -1066,10 +1275,13 @@ void status_bar(Arena* a, UIContext* ctx, DemoState* state) {
     }
 
     if (show_right) {
-        ui_text(a, ctx, W - 250.0f, bar.y + 5.0f, "VRAM 1.9/4.0 GB \xC2\xB7 F2 Theme", t.text_dim, 11.5f);
+        const char* right = (app && app->base.valid())
+                                ? arena_fmt(a, "%dx%d \xC2\xB7 F2 Theme",
+                                            app->base.width, app->base.height)
+                                : "F2 Theme";
+        ui_text(a, ctx, W - 250.0f, bar.y + 5.0f, right, t.text_dim, 11.5f);
     }
 
-    // Size Grip (bottom-right corner)
     const Rect grip_area{W - 20.0f, H - 20.0f, 20.0f, 20.0f};
     state->size_grip_hovered = ui_hovered(ctx, grip_area);
 
@@ -1095,18 +1307,17 @@ void status_bar(Arena* a, UIContext* ctx, DemoState* state) {
 // ---------------------------------------------------------------------------
 // 7. Modals: Settings & About
 // ---------------------------------------------------------------------------
-void settings_modal(Arena* a, UIContext* ctx, DemoState* state) {
+void settings_modal(Arena* a, UIContext* ctx, UIState* state) {
     const Theme& t = *ctx->theme;
     const float W = ctx->screen_w;
     const float H = ctx->screen_h;
 
     ctx->in_popup_layer = true;
 
-    // Dark backdrop
     ui_rect(a, ctx, Rect{0, 0, W, H}, Color{0, 0, 0, 0x85});
 
     const float modal_w = 440.0f;
-    const float modal_h = 320.0f;
+    const float modal_h = 340.0f;
     const Rect modal{(W - modal_w) * 0.5f, (H - modal_h) * 0.5f, modal_w, modal_h};
 
     ui_rect(a, ctx, modal, t.bg_panel, 10.0f);
@@ -1124,40 +1335,71 @@ void settings_modal(Arena* a, UIContext* ctx, DemoState* state) {
 
     float row_y = modal.y + 64.0f;
 
-    ui_text(a, ctx, modal.x + 20.0f, row_y + 4.0f, "Application Theme", t.text, 14.0f, 2);
-    const char* theme_lbl = state->light_theme ? "Light Theme" : "Dark Theme";
+    ui_text(a, ctx, modal.x + 20.0f, row_y + 4.0f, "Application theme", t.text, 14.0f, 2);
+    const char* theme_lbl = state->light_theme ? "Light theme" : "Dark theme";
     if (ui_button_icon_text(a, ctx, Rect{modal.x + modal.w - 140.0f, row_y, 120.0f, 32.0f},
                             0, theme_lbl, t.bg_control, 6.0f, 0.0f, 13.0f, true, tone_control_text(t))) {
         state->light_theme = !state->light_theme;
     }
     row_y += 46.0f;
 
-    ui_text(a, ctx, modal.x + 20.0f, row_y + 4.0f, "Compute Device", t.text, 14.0f, 2);
-    static const char* kDevices[] = { "NVIDIA CUDA (Default)", "Vulkan Compute", "CPU (Scalar)" };
-    static int dev_idx = 0;
+    ui_text(a, ctx, modal.x + 20.0f, row_y + 4.0f, "Compute device", t.text, 14.0f, 2);
+    static const char* kDevices[] = {"Auto (GPU first)", "CUDA", "CPU"};
+    int dev_idx = state->app ? state->app->provider : 0;
     const Rect dev_combo{modal.x + modal.w - 190.0f, row_y, 170.0f, 32.0f};
-    ui_combo(a, ctx, dev_combo, kDevices, 3, &dev_idx, &t);
+    if (ui_combo(a, ctx, dev_combo, kDevices, 3, &dev_idx, &t)) {
+        state->provider_index = dev_idx;
+        if (state->app) {
+            state->app->provider = static_cast<uint8_t>(dev_idx);
+            state->app->markConfigDirty();
+        }
+    }
     row_y += 46.0f;
 
-    ui_text(a, ctx, modal.x + 20.0f, row_y + 4.0f, "VRAM Cache Budget", t.text, 14.0f, 2);
-    static const char* kVramOptions[] = { "4.0 GB (Recommended)", "2.0 GB (Low)", "8.0 GB (High)" };
-    static int vram_idx = 0;
-    const Rect vram_combo{modal.x + modal.w - 190.0f, row_y, 170.0f, 32.0f};
-    ui_combo(a, ctx, vram_combo, kVramOptions, 3, &vram_idx, &t);
-    row_y += 46.0f;
+    ui_text(a, ctx, modal.x + 20.0f, row_y + 4.0f, "Models folder", t.text, 14.0f, 2);
+    const UITextEditResult me = ui_text_edit(a, ctx, Rect{modal.x + modal.w - 224.0f, row_y, 204.0f, 32.0f},
+                                             state->models_dir, sizeof(state->models_dir), &t,
+                                             "models", 0x0f03);
+    if (state->app && (me == UITextEditResult::Changed || me == UITextEditResult::Submitted)) {
+        state->app->model_dir = state->models_dir;
+        state->app->markConfigDirty();
+    }
+    row_y += 42.0f;
 
-    static bool auto_save = true;
-    ui_checkbox(a, ctx, modal.x + 20.0f, row_y, "Automatically save project changes on exit", &auto_save, &t);
+    bool unload = state->app ? state->app->unload_after_run : false;
+    ui_checkbox(a, ctx, modal.x + 20.0f, row_y, "Unload models between runs", &unload, &t);
+    if (state->app && unload != state->app->unload_after_run) {
+        state->app->unload_after_run = unload;
+        state->app->markConfigDirty();
+    }
+    row_y += 30.0f;
+
+    bool check_updates = state->app ? state->app->check_updates : true;
+    ui_checkbox(a, ctx, modal.x + 20.0f, row_y, "Check GitHub releases", &check_updates, &t);
+    if (state->app && check_updates != state->app->check_updates) {
+        state->app->check_updates = check_updates;
+        state->app->markConfigDirty();
+    }
+    row_y += 34.0f;
+
+    if (state->app) {
+        ui_text(a, ctx, modal.x + 20.0f, row_y,
+                arena_fmt(a, "Active engine: %s",
+                          state->app->providerName().empty() ? "not loaded"
+                                                             : state->app->providerName().c_str()),
+                t.text_muted, 12.5f, 2);
+    }
 
     if (ui_button_icon_text(a, ctx, Rect{modal.x + modal.w - 100.0f, modal.y + modal.h - 44.0f, 82.0f, 32.0f},
                             0, "Done", t.accent, 6.0f, 0.0f, 13.0f, true, t.on_accent)) {
+        if (state->app) state->app->saveConfig();
         state->show_settings = false;
     }
 
     ctx->in_popup_layer = false;
 }
 
-void about_modal(Arena* a, UIContext* ctx, DemoState* state) {
+void about_modal(Arena* a, UIContext* ctx, UIState* state) {
     const Theme& t = *ctx->theme;
     const float W = ctx->screen_w;
     const float H = ctx->screen_h;
@@ -1167,7 +1409,7 @@ void about_modal(Arena* a, UIContext* ctx, DemoState* state) {
     ui_rect(a, ctx, Rect{0, 0, W, H}, Color{0, 0, 0, 0x85});
 
     const float modal_w = 460.0f;
-    const float modal_h = 310.0f;
+    const float modal_h = 300.0f;
     const Rect modal{(W - modal_w) * 0.5f, (H - modal_h) * 0.5f, modal_w, modal_h};
 
     ui_rect(a, ctx, modal, t.bg_panel, 10.0f);
@@ -1180,21 +1422,20 @@ void about_modal(Arena* a, UIContext* ctx, DemoState* state) {
 
     ui_icon_gradient(a, ctx, modal.x + 24.0f, modal.y + 24.0f, ICON_LOGO,
                      Color{0x41, 0x76, 0xee, 0xff}, Color{0xb3, 0x2e, 0xf2, 0xff}, 42.0f);
-    ui_text_bold(a, ctx, modal.x + 80.0f, modal.y + 24.0f, "FaceForge v2.4", t.text, 18.0f);
-    ui_text(a, ctx, modal.x + 80.0f, modal.y + 48.0f, "Agnostic Memory-First UI Engine (AMUIE)", t.accent, 13.0f, 2);
+    ui_text_bold(a, ctx, modal.x + 80.0f, modal.y + 24.0f, "FaceForge", t.text, 18.0f);
+    ui_text(a, ctx, modal.x + 80.0f, modal.y + 48.0f, "restore \xC2\xB7 swap \xC2\xB7 enhance",
+            t.accent, 13.0f, 2);
 
     ui_separator(a, ctx, modal.x + 20.0f, modal.y + 82.0f, modal.w - 40.0f, t.border);
 
     float ty = modal.y + 100.0f;
-    ui_text(a, ctx, modal.x + 24.0f, ty, "Architecture: C++20 \xC2\xB7 Arena Bump-Allocated", t.text, 13.5f);
+    ui_text(a, ctx, modal.x + 24.0f, ty, "Native C++ UI on the FaceForge core (C ABI)", t.text, 13.5f);
     ty += 24.0f;
-    ui_text(a, ctx, modal.x + 24.0f, ty, "Memory model: Zero runtime allocations in update/render loops", t.text, 13.5f);
+    ui_text(a, ctx, modal.x + 24.0f, ty, "ONNX Runtime/OpenCV pipeline, unchanged core", t.text, 13.5f);
     ty += 24.0f;
-    ui_text(a, ctx, modal.x + 24.0f, ty, "Renderer: Agnostic Command Queue + OpenGL 3.3 Backend", t.text, 13.5f);
+    ui_text(a, ctx, modal.x + 24.0f, ty, "Immediate-mode widgets, arena allocated", t.text, 13.5f);
     ty += 24.0f;
-    ui_text(a, ctx, modal.x + 24.0f, ty, "Assets: Pre-baked single alpha atlas (Cantarell VF + Lucide)", t.text, 13.5f);
-    ty += 28.0f;
-    ui_text(a, ctx, modal.x + 24.0f, ty, "Modern Responsive Dark UI with Timeline & Scrubber", t.text_muted, 12.5f);
+    ui_text(a, ctx, modal.x + 24.0f, ty, "https://github.com/vhanla/faceforge", t.accent, 13.0f, 2);
 
     if (ui_button_icon_text(a, ctx, Rect{modal.x + modal.w - 100.0f, modal.y + modal.h - 44.0f, 82.0f, 32.0f},
                             0, "OK", t.accent, 6.0f, 0.0f, 13.0f, true, t.on_accent)) {
@@ -1206,12 +1447,22 @@ void about_modal(Arena* a, UIContext* ctx, DemoState* state) {
 
 } // namespace
 
-void demo_draw(Arena* frame, UIContext* ui, DemoState* state) {
+void faceforge_draw(Arena* frame, UIContext* ui, UIState* state) {
     state->window_action = WindowAction::None;
 
     if (ui->theme == nullptr) ui->theme = &theme_faceforge();
     if (ui->screen_w <= 0.0f) ui->screen_w = kDesignW;
     if (ui->screen_h <= 0.0f) ui->screen_h = kDesignH;
+
+    // Adopt a new default output path after opening a target, but never while
+    // the user is typing in the field.
+    if (state->sync_output_path) {
+        state->sync_output_path = false;
+        if (state->app) {
+            std::snprintf(state->output_path, sizeof(state->output_path), "%s",
+                          state->app->save_path.c_str());
+        }
+    }
 
     const Theme& t = *ui->theme;
     const float W = ui->screen_w;
@@ -1220,7 +1471,6 @@ void demo_draw(Arena* frame, UIContext* ui, DemoState* state) {
 
     const Layout L = compute_layout(ui, state);
 
-    // Playback loop in Video mode
     if (state->mode == AppMode::Video && state->is_playing) {
         state->play_accum += ui->dt * state->fps;
         while (state->play_accum >= 1.0f) {
@@ -1238,7 +1488,6 @@ void demo_draw(Arena* frame, UIContext* ui, DemoState* state) {
         }
     }
 
-    // Wheel scroll handling
     if (ui->scroll_delta != 0.0f && ui->mouse_y >= 124.0f && ui->mouse_y < H - L.status_h) {
         if (ui->mouse_x >= L.left_x && ui->mouse_x < L.left_x + L.left_w) {
             if (state->mode == AppMode::Photo) {
@@ -1249,38 +1498,25 @@ void demo_draw(Arena* frame, UIContext* ui, DemoState* state) {
         }
     }
 
-    // 1. Navigation Rail (Collapsible, Photo / Video / Settings / About)
     nav_sidebar(frame, ui, state, L.rail_w);
-
-    // 2. Header (FaceForge brand + window controls)
     header(frame, ui, state);
-
-    // 3. Top Toolbar
     toolbar(frame, ui, state, L.rail_w);
 
-    // 4. Main Body: Photo Mode or Video Mode
     if (state->mode == AppMode::Photo) {
         photo_left_sidebar(frame, ui, state, L);
         photo_center_panel(frame, ui, state, L);
-        photo_right_sidebar(frame, ui, L);
+        photo_right_sidebar(frame, ui, state, L);
     } else {
         video_left_sidebar(frame, ui, state, L);
         video_center_panel(frame, ui, state, L);
         video_right_sidebar(frame, ui, state, L);
     }
 
-    // 5. Status Bar & Size Grip (pinned to bottom)
     status_bar(frame, ui, state);
 
-    // 6. Settings & About Modals
-    if (state->show_settings) {
-        settings_modal(frame, ui, state);
-    }
-    if (state->show_about) {
-        about_modal(frame, ui, state);
-    }
+    if (state->show_settings) settings_modal(frame, ui, state);
+    if (state->show_about) about_modal(frame, ui, state);
 
-    // 7. Frameless Window Frame & Corner Masks
     ui_clip(frame, ui, Rect{0, 0, W, H});
     ui_rect_rounded_inverse(frame, ui, Rect{0.0f, 0.0f, W, H}, t.bg_window, 6.0f);
     ui_rect_border(frame, ui, Rect{0.0f, 0.0f, W, H},

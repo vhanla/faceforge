@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace platform {
 
@@ -74,5 +75,14 @@ void set_cursor_resize(Window* window, bool resize);
 
 double time_seconds();
 const char* platform_name();
+
+// Native file choosers. `filter` is a space-separated list of globs
+// ("*.png *.jpg"); an empty filter allows anything. Return an empty string when
+// cancelled or when no dialog backend is available (e.g. no zenity/kdialog).
+// On Linux these block the UI thread while the external dialog runs.
+std::string open_file_dialog(const char* title, const char* filter,
+                             const char* initial_path);
+std::string save_file_dialog(const char* title, const char* filter,
+                             const char* initial_path, const char* default_name);
 
 } // namespace platform

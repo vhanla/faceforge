@@ -1,32 +1,34 @@
-// FaceForge native-UI spike.
+// FaceForge native UI entry point.
 //
-// Proves three things before committing to the full DVUI/Zig replacement:
-//   1. the vendored AMUIE library builds inside FaceForge via CMake,
-//   2. the native C ABI (core/include/faceforge.h) is callable from the C++
-//      UI with no bindings layer,
-//   3. an image loaded by the core renders in the canvas through the new
-//      CMD_DRAW_TEXTURE path.
+// Drives the real application: it builds app::App (the UI-agnostic pipeline:
+// engine, worker thread, identity library, undo/redo) and the FaceForge screen
+// (app/ui_faceforge.*), which is rendered with the vendored AMUIE widgets on
+// top of the unchanged C core (core/include/faceforge.h).
 //
-// It reuses the AMUIE FaceForge demo screen and swaps the canvas empty state
-// for the real image. Video workspace, engine jobs and editing are out of
-// scope here (later phases).
+// The only work this file does beyond the frame loop is texture lifetime: the
+// UI draws image ids, so the entry point uploads / destroys the base, result,
+// face-thumbnail and identity-thumbnail textures as the app's dirty flags and
+// generations change.
+
+#include "app.hpp"
+#include "config.hpp"
+#include "ui_faceforge.hpp"
 
 #include "backend/opengl3_backend.hpp"
 #include "core/arena.hpp"
 #include "core/theme.hpp"
 #include "core/types.hpp"
-#include "demo/faceforge.hpp"
 #include "platform/input.hpp"
 #include "platform/window.hpp"
 #include "widgets/ui_widgets.hpp"
-
-#include "faceforge.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <vector>
 
 namespace {
 
@@ -35,41 +37,232 @@ constexpr int kDesignH = 1027;
 
 struct Options {
     const char* screenshot = nullptr;
-    const char* image = "assets/source_lena.jpg";
+    std::string target = "assets/target_t1.jpg";
+    bool target_set = false;
+    std::vector<std::string> identities;
+    std::string save;
+    std::string config;
+    std::string provider;
+    std::string models;
+    std::string temp_dir;
+    std::string export_dir;
+    bool no_config = false;
+    bool no_update_check = false;
+    bool check_updates = false;
+    bool update_explicit = false;
     int frames = 3;
     bool light = false;
     bool video = false;
+    bool wait_idle = false;
     int width = kDesignW;
     int height = kDesignH;
 };
 
+void print_usage(const char* argv0) {
+    std::printf(
+        "usage: %s [options]\n"
+        "  --target PATH       target image to open (default assets/target_t1.jpg)\n"
+        "  --identity PATH     identity image; repeatable, or a ';'-separated list\n"
+        "  --models DIR        models directory (default models)\n"
+        "  --temp-dir DIR      temporary files directory\n"
+        "  --export-dir DIR    default export directory\n"
+        "  --provider NAME     auto | cuda | cpu\n"
+        "  --config PATH       settings file\n"
+        "  --no-config         ignore the settings file\n"
+        "  --no-update-check   disable the update check\n"
+        "  --check-updates     enable the update check\n"
+        "  --save PATH         save path used by the Output field\n"
+        "  --video             start in the video workspace\n"
+        "  --light             start with the light theme\n"
+        "  --screenshot OUT    render a few frames, write a PPM and exit\n"
+        "  --frames N          frames to render before the screenshot (default 3)\n"
+        "  --wait              screenshot only once the pipeline goes idle\n"
+        "  --size WxH          initial window size\n",
+        argv0);
+}
+
 Options parse_args(int argc, char** argv) {
     Options o;
+    auto value = [&](int& i) -> const char* {
+        if (i + 1 < argc) return argv[++i];
+        return nullptr;
+    };
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc) {
-            o.screenshot = argv[++i];
-        } else if (std::strcmp(argv[i], "--image") == 0 && i + 1 < argc) {
-            o.image = argv[++i];
-        } else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
-            o.frames = std::max(1, std::atoi(argv[++i]));
-        } else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
-            int w = 0, h = 0;
-            if (std::sscanf(argv[++i], "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
-                o.width = w;
-                o.height = h;
+        const char* a = argv[i];
+        if (std::strcmp(a, "--screenshot") == 0) {
+            if (const char* v = value(i)) o.screenshot = v;
+        } else if (std::strcmp(a, "--target") == 0 || std::strcmp(a, "--image") == 0) {
+            if (const char* v = value(i)) {
+                o.target = v;
+                o.target_set = true;
             }
-        } else if (std::strcmp(argv[i], "--light") == 0) {
+        } else if (std::strcmp(a, "--identity") == 0) {
+            if (const char* v = value(i)) {
+                // Accept both a repeated flag and a ';'-separated list.
+                std::string rest = v;
+                size_t start = 0;
+                while (start <= rest.size()) {
+                    const size_t semi = rest.find(';', start);
+                    const size_t end = semi == std::string::npos ? rest.size() : semi;
+                    if (end > start) o.identities.push_back(rest.substr(start, end - start));
+                    if (semi == std::string::npos) break;
+                    start = semi + 1;
+                }
+            }
+        } else if (std::strcmp(a, "--models") == 0 || std::strcmp(a, "--models-dir") == 0) {
+            if (const char* v = value(i)) o.models = v;
+        } else if (std::strcmp(a, "--temp-dir") == 0) {
+            if (const char* v = value(i)) o.temp_dir = v;
+        } else if (std::strcmp(a, "--export-dir") == 0) {
+            if (const char* v = value(i)) o.export_dir = v;
+        } else if (std::strcmp(a, "--provider") == 0 || std::strcmp(a, "--device") == 0) {
+            if (const char* v = value(i)) o.provider = v;
+        } else if (std::strcmp(a, "--config") == 0) {
+            if (const char* v = value(i)) o.config = v;
+        } else if (std::strcmp(a, "--save") == 0) {
+            if (const char* v = value(i)) o.save = v;
+        } else if (std::strcmp(a, "--no-config") == 0) {
+            o.no_config = true;
+        } else if (std::strcmp(a, "--no-update-check") == 0) {
+            o.no_update_check = true;
+        } else if (std::strcmp(a, "--check-updates") == 0) {
+            o.check_updates = true;
+            o.update_explicit = true;
+        } else if (std::strcmp(a, "--frames") == 0) {
+            if (const char* v = value(i)) o.frames = std::max(1, std::atoi(v));
+        } else if (std::strcmp(a, "--size") == 0) {
+            int w = 0, h = 0;
+            if (const char* v = value(i)) {
+                if (std::sscanf(v, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+                    o.width = w;
+                    o.height = h;
+                }
+            }
+        } else if (std::strcmp(a, "--light") == 0) {
             o.light = true;
-        } else if (std::strcmp(argv[i], "--video") == 0) {
+        } else if (std::strcmp(a, "--video") == 0) {
             o.video = true;
-        } else if (std::strcmp(argv[i], "--help") == 0) {
-            std::printf("usage: %s [--image path] [--screenshot out.ppm] "
-                        "[--frames N] [--size WxH] [--light] [--video]\n",
-                        argv[0]);
+        } else if (std::strcmp(a, "--wait") == 0) {
+            o.wait_idle = true;
+        } else if (std::strcmp(a, "--help") == 0 || std::strcmp(a, "-h") == 0) {
+            print_usage(argv[0]);
             std::exit(0);
         }
     }
     return o;
+}
+
+void apply_env(app::App& app, const Options& o) {
+    if (const char* v = std::getenv("FACEFORGE_MODELS")) app.model_dir = v;
+    if (const char* v = std::getenv("FACEFORGE_TEMP_DIR")) app.temp_dir = v;
+    if (const char* v = std::getenv("FACEFORGE_EXPORT_DIR")) app.export_dir = v;
+    if (const char* v = std::getenv("FACEFORGE_PROVIDER")) app.provider = config::providerFromName(v);
+    if (std::getenv("FACEFORGE_SEQUENTIAL")) app.unload_after_run = true;
+    if (const char* v = std::getenv("FACEFORGE_CHECK_UPDATES")) {
+        app.check_updates = !(std::strcmp(v, "0") == 0 || std::strcmp(v, "false") == 0 ||
+                              std::strcmp(v, "off") == 0);
+    }
+    if (const char* v = std::getenv("FACEFORGE_UPDATE_INTERVAL_HOURS")) {
+        const long h = std::strtol(v, nullptr, 10);
+        if (h > 0) app.update_interval_hours = static_cast<uint32_t>(std::min<long>(h, 24 * 365));
+    }
+    (void)o;
+}
+
+void apply_cli(app::App& app, const Options& o) {
+    if (!o.models.empty()) app.model_dir = o.models;
+    if (!o.temp_dir.empty()) app.temp_dir = o.temp_dir;
+    if (!o.export_dir.empty()) app.export_dir = o.export_dir;
+    if (!o.provider.empty()) app.provider = config::providerFromName(o.provider);
+    if (o.no_update_check) app.check_updates = false;
+    if (o.update_explicit) app.check_updates = o.check_updates;
+    if (!o.save.empty()) {
+        app.save_path = o.save;
+        app.save_explicit = true;
+    }
+}
+
+// ---- texture lifetime ------------------------------------------------------
+
+// Uploads (or destroys, when the image is gone) a full-resolution image.
+void upload_image(OpenGL3Backend& backend, uint64_t& tex, int& tw, int& th,
+                  const ff::Image* img) {
+    if (tex) {
+        backend.destroy_texture(tex);
+        tex = 0;
+    }
+    tw = th = 0;
+    if (!img || !img->valid()) return;
+    tex = backend.create_texture_bgr(img->data, img->width, img->height, img->stride);
+    tw = img->width;
+    th = img->height;
+}
+
+// Uploads a thumbnail into `tex`, recreating it (thumbnails never change size).
+void upload_thumb(OpenGL3Backend& backend, uint64_t& tex, const ff::Image& img) {
+    if (!img.valid()) {
+        if (tex) {
+            backend.destroy_texture(tex);
+            tex = 0;
+        }
+        return;
+    }
+    if (tex) backend.destroy_texture(tex);
+    tex = backend.create_texture_bgr(img.data, img.width, img.height, img.stride);
+}
+
+void sync_textures(OpenGL3Backend& backend, app::App& app, UIState& st) {
+    if (app.base_dirty) {
+        app.base_dirty = false;
+        upload_image(backend, st.base_tex, st.base_tex_w, st.base_tex_h,
+                     app.base.valid() ? &app.base : nullptr);
+    }
+    if (app.result_dirty) {
+        app.result_dirty = false;
+        upload_image(backend, st.result_tex, st.result_tex_w, st.result_tex_h,
+                     app.result.valid() ? &app.result : nullptr);
+    }
+
+    // Face thumbnails are rebuilt by App::poll() on this thread, so reading the
+    // dirty flags here (after poll) cannot race the worker.
+    for (int i = 0; i < app::kMaxFaces; ++i) {
+        if (i < app.face_count && app.face_thumb[i].dirty) {
+            app.face_thumb[i].dirty = false;
+            upload_thumb(backend, st.face_tex[i], app.face_thumb[i].img);
+        } else if (i >= app.face_count && st.face_tex[i]) {
+            backend.destroy_texture(st.face_tex[i]);
+            st.face_tex[i] = 0;
+        }
+    }
+
+    // Identity thumbnails live behind App::eachIdentityThumb's lock.
+    const app::IdentitiesSnapshot ids = app.identitiesSnapshot();
+    if (ids.gen != st.identity_gen_seen) {
+        st.identity_gen_seen = ids.gen;
+        int seen = 0;
+        app.eachIdentityThumb([&](int i, const ff::Image& img) {
+            if (i < 0 || i >= app::kMaxIdentities) return;
+            upload_thumb(backend, st.identity_tex[i], img);
+            seen = i + 1;
+        });
+        for (int i = seen; i < app::kMaxIdentities; ++i) {
+            if (st.identity_tex[i]) {
+                backend.destroy_texture(st.identity_tex[i]);
+                st.identity_tex[i] = 0;
+            }
+        }
+    }
+}
+
+void destroy_textures(OpenGL3Backend& backend, UIState& st) {
+    if (st.base_tex) backend.destroy_texture(st.base_tex);
+    if (st.result_tex) backend.destroy_texture(st.result_tex);
+    for (int i = 0; i < app::kMaxFaces; ++i) {
+        if (st.face_tex[i]) backend.destroy_texture(st.face_tex[i]);
+    }
+    for (int i = 0; i < app::kMaxIdentities; ++i) {
+        if (st.identity_tex[i]) backend.destroy_texture(st.identity_tex[i]);
+    }
 }
 
 int dispatch_commands(OpenGL3Backend& backend, UIContext& ui) {
@@ -121,7 +314,7 @@ int main(int argc, char** argv) {
     platform::WindowDesc desc;
     desc.width = options.width;
     desc.height = options.height;
-    desc.title = "FaceForge (native UI spike)";
+    desc.title = "FaceForge";
     desc.undecorated = true;
     desc.transparent = false;
     desc.resizable = true;
@@ -135,31 +328,68 @@ int main(int argc, char** argv) {
 
     Arena frame_arena = Arena::create(8 * 1024 * 1024);
     Arena state_arena = Arena::create(64 * 1024);
-    DemoState* demo = state_arena.make<DemoState>();
-    if (!frame_arena.buffer || !state_arena.buffer || !demo) {
+    UIState* state = state_arena.make<UIState>();
+    if (!frame_arena.buffer || !state_arena.buffer || !state) {
         std::fprintf(stderr, "arena allocation failed\n");
         platform::destroy(window);
         return 1;
     }
-    demo->light_theme = options.light;
-    if (options.video) demo->mode = AppMode::Video;
+
+    app::App* app = new app::App();
+
+    // ---- configuration precedence: CLI > environment > file > defaults ----
+    const bool test_mode = std::getenv("FACEFORGE_SELFTEST") != nullptr ||
+                           std::getenv("FACEFORGE_VIDEOTEST") != nullptr;
+    const char* env_config = std::getenv("FACEFORGE_CONFIG");
+    const bool explicit_config = !options.config.empty() || env_config != nullptr;
+    if (!options.no_config && (!test_mode || explicit_config)) {
+        std::string path = !options.config.empty() ? options.config
+                           : env_config                 ? env_config
+                                                        : config::defaultPath();
+        app->loadConfig(path);
+    }
+    apply_env(*app, options);
+    apply_cli(*app, options);
+
+    state->app = app;
+    state->light_theme = options.light;
+    state->mode = options.video ? AppMode::Video : AppMode::Photo;
+    std::snprintf(state->models_dir, sizeof(state->models_dir), "%s", app->model_dir.c_str());
+
+    if (std::getenv("FACEFORGE_SELFTEST")) {
+        // Scripted runs render at full resolution.
+        app->fast_preview = false;
+    }
+
+    // Target and identity can also come from the environment, matching the
+    // Zig GUI's scripted E2E entry points.
+    std::string target = options.target;
+    if (!options.target_set) {
+        if (const char* v = std::getenv("FACEFORGE_TARGET")) target = v;
+    }
+    std::vector<std::string> identities = options.identities;
+    if (identities.empty()) {
+        if (const char* v = std::getenv("FACEFORGE_IDENTITY")) {
+            const std::string list = v;
+            size_t start = 0;
+            while (start <= list.size()) {
+                const size_t semi = list.find(';', start);
+                const size_t end = semi == std::string::npos ? list.size() : semi;
+                if (end > start) identities.push_back(list.substr(start, end - start));
+                if (semi == std::string::npos) break;
+                start = semi + 1;
+            }
+        }
+    }
+
+    if (!target.empty()) {
+        app->openTarget(target);
+        state->sync_output_path = true;
+    }
+    for (const std::string& p : identities) app->addIdentityFile(p);
 
     OpenGL3Backend backend;
     backend.init();
-
-    // Load a real image through the faceforge C ABI and upload it as a texture.
-    uint8_t* bgr = nullptr;
-    int32_t iw = 0, ih = 0, istride = 0;
-    if (ff_image_load(options.image, &bgr, &iw, &ih, &istride) == FF_OK && bgr) {
-        demo->canvas_tex = backend.create_texture_bgr(bgr, iw, ih, istride);
-        demo->canvas_tex_w = iw;
-        demo->canvas_tex_h = ih;
-        std::printf("image: %s (%dx%d, texture id %llu)\n", options.image, iw, ih,
-                    static_cast<unsigned long long>(demo->canvas_tex));
-        ff_image_free(bgr);
-    } else {
-        std::fprintf(stderr, "warning: could not load %s\n", options.image);
-    }
 
     UIContext ui;
     bool prev_mouse_down = false;
@@ -181,9 +411,9 @@ int main(int argc, char** argv) {
             if (ui.active_popup_id != 0) {
                 ui.active_popup_id = 0;
                 ui.active_popup_rect = Rect{};
-            } else if (demo->show_settings || demo->show_about) {
-                demo->show_settings = false;
-                demo->show_about = false;
+            } else if (state->show_settings || state->show_about) {
+                state->show_settings = false;
+                state->show_about = false;
             } else {
                 platform::set_should_close(window);
             }
@@ -191,14 +421,33 @@ int main(int argc, char** argv) {
         prev_esc_down = esc_down;
 
         const bool f2_down = platform::key_pressed(window, platform::Key::F2);
-        if (f2_down && !prev_f2_down) demo->light_theme = !demo->light_theme;
+        if (f2_down && !prev_f2_down) state->light_theme = !state->light_theme;
         prev_f2_down = f2_down;
 
         const bool space_down = platform::key_pressed(window, platform::Key::Space);
-        if (space_down && !prev_space_down && demo->mode == AppMode::Video) {
-            demo->is_playing = !demo->is_playing;
+        if (space_down && !prev_space_down && state->mode == AppMode::Video) {
+            state->is_playing = !state->is_playing;
         }
         prev_space_down = space_down;
+
+        // Drag-and-drop: the first image opens the target, later ones join the
+        // identity library (matching the Zig GUI).
+        if (ui.input.dropped_count > 0 && !app->busy()) {
+            for (int i = 0; i < ui.input.dropped_count; ++i) {
+                const char* path = ui.input.dropped_files[i];
+                if (!path || !*path) continue;
+                if (!app->base.valid()) {
+                    app->openTarget(path);
+                    state->sync_output_path = true;
+                } else {
+                    app->addIdentityFile(path);
+                }
+            }
+        }
+
+        // Advance the worker and publish anything it finished this frame.
+        app->poll();
+        sync_textures(backend, *app, *state);
 
         int fb_w = 0, fb_h = 0;
         int win_w = 0, win_h = 0;
@@ -245,7 +494,7 @@ int main(int argc, char** argv) {
         ui.mouse_right_clicked = mouse_right_clicked;
         ui.mouse_right_released = mouse_right_released;
 
-        ui.theme = demo->light_theme ? &theme_light() : &theme_faceforge();
+        ui.theme = state->light_theme ? &theme_light() : &theme_faceforge();
         ui.time_seconds = static_cast<float>(now);
         ui.dt = dt;
         ui.scroll_delta = static_cast<float>(scroll);
@@ -273,7 +522,7 @@ int main(int argc, char** argv) {
         }
 
         const double ui_start = platform::time_seconds();
-        demo_draw(&frame_arena, &ui, demo);
+        faceforge_draw(&frame_arena, &ui, state);
         ui_end_frame(&frame_arena, &ui);
 
         // Text widgets may have requested a clipboard write (copy/cut).
@@ -281,18 +530,18 @@ int main(int argc, char** argv) {
             platform::clipboard_set_text(window, ui.input.clipboard_out);
         }
 
-        switch (demo->window_action) {
+        switch (state->window_action) {
             case WindowAction::Minimize: platform::minimize(window); break;
             case WindowAction::Maximize: platform::toggle_maximize(window); break;
             case WindowAction::Close: platform::set_should_close(window); break;
             case WindowAction::None: break;
         }
         platform::drag_update(window,
-            demo->header_drag && mouse_down && demo->window_action == WindowAction::None);
+            state->header_drag && mouse_down && state->window_action == WindowAction::None);
         platform::resize_update(window,
-            demo->size_grip_drag && mouse_down && demo->window_action == WindowAction::None);
+            state->size_grip_drag && mouse_down && state->window_action == WindowAction::None);
         platform::set_cursor_resize(window,
-            demo->size_grip_hovered || demo->size_grip_drag);
+            state->size_grip_hovered || state->size_grip_drag);
 
         const Theme& theme = *ui.theme;
         backend.set_clear_color(theme.bg_window);
@@ -304,7 +553,8 @@ int main(int argc, char** argv) {
         ui_ms_total += (platform::time_seconds() - ui_start) * 1000.0;
         ++ui_frames;
 
-        if (options.screenshot && frame + 1 >= options.frames) {
+        const bool idle_ok = !options.wait_idle || !app->busy();
+        if (options.screenshot && frame + 1 >= options.frames && idle_ok) {
             if (backend.save_screenshot_ppm(options.screenshot)) {
                 std::printf("screenshot: %s\n", options.screenshot);
             } else {
@@ -322,7 +572,9 @@ int main(int argc, char** argv) {
     std::printf("ui cpu cost: %.2f ms/frame over %d frames\n",
                 ui_frames > 0 ? ui_ms_total / ui_frames : 0.0, ui_frames);
 
-    if (demo->canvas_tex) backend.destroy_texture(demo->canvas_tex);
+    if (app->config_dirty) app->saveConfig();
+    destroy_textures(backend, *state);
+    delete app;
     frame_arena.destroy();
     state_arena.destroy();
     platform::destroy(window);

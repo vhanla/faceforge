@@ -14,7 +14,9 @@
 #include "config.hpp"
 #include "ff.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -102,6 +104,15 @@ struct FacesSnapshot {
     bool patch_valid[kMaxFaces]{};
 };
 
+// A locked snapshot of the identity library labels (the UI never touches the
+// embeddings or thumbnails directly).
+struct IdentitiesSnapshot {
+    int count = 0;
+    int default_identity = 0;
+    uint32_t gen = 0;
+    std::string labels[kMaxIdentities];
+};
+
 // An identity image decoded and waiting to be scanned by the worker.
 struct PendingIdentity {
     ff::Image img;
@@ -187,10 +198,10 @@ struct App {
     std::vector<ff::Image> redo;
 
     // ---- UI-thread published status ----
-    Stage stage_value = Stage::Idle;
-    int progress_value = 0; // permille
     std::string status_text = "Ready";
     bool status_is_error = false;
+    Timings timings_published;
+    std::string provider_published;
 
     // Image clipboard payload produced by copyResult() for the platform layer.
     std::vector<uint8_t> clipboard_png;
@@ -221,6 +232,7 @@ struct App {
     void saveResult(const std::string& path);
     void copyResult();
     void applyResultAsInput();
+    void clearTarget();
 
     void undoHistory();
     void redoHistory();
@@ -241,11 +253,30 @@ struct App {
         return static_cast<Stage>(stage_value_.load(std::memory_order_relaxed));
     }
 
+    // UI-thread-only views of the last published job state.
+    const std::string& statusText() const { return status_text; }
+    bool statusIsError() const { return status_is_error; }
+    const Timings& lastTimings() const { return timings_published; }
+    const std::string& providerName() const { return provider_published; }
+    int undoCount() const { return static_cast<int>(undo.size()); }
+    int redoCount() const { return static_cast<int>(redo.size()); }
+
     FacesSnapshot facesSnapshot() const;
+    IdentitiesSnapshot identitiesSnapshot() const;
     // True when at least one identity is available.
     bool hasIdentities() const;
     bool undoEmpty() const { return undo.empty(); }
     bool redoEmpty() const { return redo.empty(); }
+
+    // Visits each identity thumbnail while holding the library lock, so the UI
+    // can upload textures without racing the worker appending new identities.
+    // The image pointers are valid for the duration of the call only.
+    template <typename Fn>
+    void eachIdentityThumb(Fn&& fn) const {
+        std::lock_guard<std::mutex> lk(ident_mu_);
+        const int n = std::min(static_cast<int>(identities.size()), kMaxIdentities);
+        for (int i = 0; i < n; ++i) fn(i, identities[static_cast<size_t>(i)].thumb.img);
+    }
 
 private:
     // worker plumbing
@@ -320,6 +351,10 @@ private:
 
     // Guards faces/patches/flags against the UI's snapshot/toggles.
     mutable std::mutex mu_;
+
+    // Guards the identity library against the UI's label snapshot while the
+    // worker appends to it.
+    mutable std::mutex ident_mu_;
 
     ExportKind pending_export_ = ExportKind::None;
     std::string export_path_;
