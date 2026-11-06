@@ -1,0 +1,45 @@
+cmake_minimum_required(VERSION 3.20)
+project(AMUIE_Engine CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+find_package(glfw3 3.3 REQUIRED)
+
+add_executable(muie_demo
+    src/main.cpp
+    src/core/font.cpp
+    src/widgets/ui_widgets.cpp
+    src/platform/window.cpp
+    src/backend/opengl3_backend.cpp
+    src/assets/font_atlas.cpp
+    src/demo/faceforge.cpp
+)
+
+target_include_directories(muie_demo PRIVATE src)
+
+target_link_libraries(muie_demo PRIVATE glfw)
+
+if(WIN32)
+    target_link_libraries(muie_demo PRIVATE Opengl32)
+elseif(APPLE)
+    target_link_libraries(muie_demo PRIVATE "-framework OpenGL")
+else()
+    target_link_libraries(muie_demo PRIVATE GL)
+endif()
+
+if(NOT MSVC)
+    target_compile_options(muie_demo PRIVATE -Wall -Wextra)
+endif()
+
+add_executable(test_suite
+    tests/test_suite.cpp
+    src/core/font.cpp
+    src/widgets/ui_widgets.cpp
+    src/assets/font_atlas.cpp
+)
+target_include_directories(test_suite PRIVATE src)
+if(NOT MSVC)
+    target_compile_options(test_suite PRIVATE -Wall -Wextra)
+endif()
