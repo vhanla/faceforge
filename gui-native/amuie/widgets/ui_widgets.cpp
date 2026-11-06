@@ -537,6 +537,328 @@ bool ui_text_input(Arena* arena, UIContext* ctx, Rect r, const char* text,
     return inter.clicked;
 }
 
+namespace {
+
+constexpr float kEditPadX = 7.0f;
+
+// Byte offset of the codepoint boundary before `pos` (never splits UTF-8).
+int edit_prev_boundary(const char* s, int pos) {
+    if (pos <= 0) return 0;
+    int i = pos - 1;
+    while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) --i;
+    return i;
+}
+
+// Byte offset of the codepoint boundary after `pos`.
+int edit_next_boundary(const char* s, size_t len, int pos) {
+    if (pos < 0) return 0;
+    if (static_cast<size_t>(pos) >= len) return static_cast<int>(len);
+    int i = pos + 1;
+    while (static_cast<size_t>(i) < len &&
+           (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) {
+        ++i;
+    }
+    return i;
+}
+
+// Width in logical px of the first `len` bytes of `s`.
+float edit_prefix_width(const char* s, size_t len, float size, uint8_t weight) {
+    if (!s || len == 0) return 0.0f;
+    const float scale = size / static_cast<float>(kFontBakeSize);
+    float x = 0.0f;
+    const char* p = s;
+    while (*p && static_cast<size_t>(p - s) < len) {
+        const uint32_t cp = utf8_next(p);
+        const Glyph* g = font_find(cp, weight);
+        if (g) x += g->advance * scale;
+    }
+    return x;
+}
+
+// Nearest codepoint boundary for a click `local_x` px past the text origin.
+int edit_index_at_x(const char* s, size_t len, float local_x, float size, uint8_t weight) {
+    const float scale = size / static_cast<float>(kFontBakeSize);
+    float x = 0.0f;
+    const char* p = s;
+    while (*p && static_cast<size_t>(p - s) < len) {
+        const char* start = p;
+        const uint32_t cp = utf8_next(p);
+        const Glyph* g = font_find(cp, weight);
+        const float adv = g ? g->advance * scale : 0.0f;
+        if (local_x < x + adv * 0.5f) return static_cast<int>(start - s);
+        x += adv;
+    }
+    return static_cast<int>(len);
+}
+
+} // namespace
+
+UITextEditResult ui_text_edit(Arena* arena, UIContext* ctx, Rect r, char* buf, size_t cap,
+                              const Theme* theme, const char* placeholder, uint64_t id) {
+    if (!ctx || !buf || cap == 0) return UITextEditResult::None;
+    if (!theme) theme = ctx->theme ? ctx->theme : &theme_faceforge();
+    if (!id) id = ui_get_id_rect(ctx, r);
+
+    UIInput& in = ctx->input;
+
+    UITextEditState* st = nullptr;
+    for (int i = 0; i < kMaxEditFields; ++i) {
+        if (in.edits[i].id == id) { st = &in.edits[i]; break; }
+    }
+    if (!st) {
+        for (int i = 0; i < kMaxEditFields; ++i) {
+            if (in.edits[i].id == 0) {
+                st = &in.edits[i];
+                st->id = id;
+                st->caret = 0;
+                st->sel = 0;
+                st->scroll = 0.0f;
+                break;
+            }
+        }
+    }
+    if (!st) return UITextEditResult::None;
+
+    const float size = theme->font_sm + 0.9f;
+    const uint8_t weight = 2;
+    size_t len = std::strlen(buf);
+
+    auto clamp_pos = [&](int32_t p) -> int32_t {
+        if (p < 0) return 0;
+        if (static_cast<size_t>(p) > len) return static_cast<int32_t>(len);
+        return p;
+    };
+    st->caret = clamp_pos(st->caret);
+    st->sel = clamp_pos(st->sel);
+
+    const UIInteraction inter = ui_process_interaction(ctx, id, r);
+
+    bool focused = (in.focused_id == id);
+    if (inter.down) {
+        in.focused_id = id;
+        focused = true;
+        const float lx = ctx->mouse_x - (r.x + kEditPadX - st->scroll);
+        const int idx = edit_index_at_x(buf, len, lx, size, weight);
+        st->caret = idx;
+        st->sel = idx;
+    } else if (focused && inter.dragging) {
+        const float lx = ctx->mouse_x - (r.x + kEditPadX - st->scroll);
+        st->caret = edit_index_at_x(buf, len, lx, size, weight);
+    }
+
+    if (focused && ctx->mouse_left_clicked && !inter.hovered) {
+        in.focused_id = 0;
+        focused = false;
+    }
+    if (focused && in.key_escape) {
+        in.focused_id = 0;
+        focused = false;
+    }
+
+    bool changed = false;
+    bool submitted = false;
+
+    auto replace_range = [&](int32_t a, int32_t b, const char* ins, size_t ins_len) -> bool {
+        if (a > b) std::swap(a, b);
+        const size_t del = static_cast<size_t>(b - a);
+        const size_t new_len = len - del + ins_len;
+        if (new_len + 1 > cap) return false;
+        std::memmove(buf + a + ins_len, buf + b, len - b + 1);
+        if (ins_len) std::memcpy(buf + a, ins, ins_len);
+        len = new_len;
+        st->caret = a + static_cast<int32_t>(ins_len);
+        st->sel = st->caret;
+        return true;
+    };
+
+    auto sel_lo = [&]() -> int32_t { return std::min(st->caret, st->sel); };
+    auto sel_hi = [&]() -> int32_t { return std::max(st->caret, st->sel); };
+
+    if (focused) {
+        const bool shift = in.key_shift != 0;
+
+        // Typed codepoints replace the selection; later ones append after it.
+        for (int i = 0; i < in.char_count; ++i) {
+            const uint32_t cp = in.characters[i];
+            if (cp < 0x20u || cp == 0x7Fu) continue;
+            char enc[4];
+            const int n = utf8_encode(cp, enc);
+            if (n <= 0) continue;
+            if (replace_range(sel_lo(), sel_hi(), enc, static_cast<size_t>(n))) changed = true;
+        }
+
+        for (int i = 0; i < in.key_backspace; ++i) {
+            if (sel_lo() != sel_hi()) {
+                if (replace_range(sel_lo(), sel_hi(), "", 0)) changed = true;
+            } else if (st->caret > 0) {
+                const int prev = edit_prev_boundary(buf, st->caret);
+                if (replace_range(prev, st->caret, "", 0)) changed = true;
+            }
+        }
+        for (int i = 0; i < in.key_delete; ++i) {
+            if (sel_lo() != sel_hi()) {
+                if (replace_range(sel_lo(), sel_hi(), "", 0)) changed = true;
+            } else if (static_cast<size_t>(st->caret) < len) {
+                const int next = edit_next_boundary(buf, len, st->caret);
+                if (replace_range(st->caret, next, "", 0)) changed = true;
+            }
+        }
+
+        for (int i = 0; i < in.key_left; ++i) {
+            if (!shift && sel_lo() != sel_hi()) {
+                st->caret = sel_lo();
+                st->sel = st->caret;
+            } else {
+                st->caret = edit_prev_boundary(buf, st->caret);
+                if (!shift) st->sel = st->caret;
+            }
+        }
+        for (int i = 0; i < in.key_right; ++i) {
+            if (!shift && sel_lo() != sel_hi()) {
+                st->caret = sel_hi();
+                st->sel = st->caret;
+            } else {
+                st->caret = edit_next_boundary(buf, len, st->caret);
+                if (!shift) st->sel = st->caret;
+            }
+        }
+        if (in.key_home) {
+            st->caret = 0;
+            if (!shift) st->sel = 0;
+        }
+        if (in.key_end) {
+            st->caret = static_cast<int32_t>(len);
+            if (!shift) st->sel = st->caret;
+        }
+
+        if (in.key_a) {
+            st->sel = 0;
+            st->caret = static_cast<int32_t>(len);
+        }
+
+        const int32_t lo = sel_lo();
+        const int32_t hi = sel_hi();
+        const bool has_sel = lo != hi;
+
+        if ((in.key_c || in.key_x) && has_sel) {
+            const size_t sel_len = static_cast<size_t>(hi - lo);
+            char* copy = static_cast<char*>(arena->alloc(sel_len + 1, 1));
+            if (copy) {
+                std::memcpy(copy, buf + lo, sel_len);
+                copy[sel_len] = '\0';
+                in.clipboard_out = copy;
+            }
+        }
+        if (in.key_x && has_sel) {
+            if (replace_range(lo, hi, "", 0)) changed = true;
+        }
+        if (in.key_v && in.clipboard) {
+            // Single-line paste: drop control characters (newlines, tabs).
+            const size_t raw = std::strlen(in.clipboard);
+            char* tmp = static_cast<char*>(arena->alloc(raw + 1, 1));
+            if (tmp) {
+                size_t n = 0;
+                for (size_t i = 0; i < raw; ++i) {
+                    const unsigned char c = static_cast<unsigned char>(in.clipboard[i]);
+                    if (c >= 0x20 && c != 0x7F) tmp[n++] = static_cast<char>(c);
+                }
+                if (n > 0 && replace_range(lo, hi, tmp, n)) changed = true;
+            }
+        }
+
+        if (in.key_enter) submitted = true;
+    }
+
+    const int32_t lo = sel_lo();
+    const int32_t hi = sel_hi();
+
+    // Keep the caret inside the visible field.
+    const float view_w = std::max(1.0f, r.w - kEditPadX * 2.0f);
+    const float caret_x = edit_prefix_width(buf, static_cast<size_t>(st->caret), size, weight);
+    if (caret_x - st->scroll > view_w) st->scroll = caret_x - view_w;
+    if (caret_x - st->scroll < 0.0f) st->scroll = caret_x;
+    if (st->scroll < 0.0f) st->scroll = 0.0f;
+    const float content_w = edit_prefix_width(buf, len, size, weight);
+    const float max_scroll = std::max(0.0f, content_w - view_w);
+    if (st->scroll > max_scroll) st->scroll = max_scroll;
+
+    const Color bg = theme->bg_app;
+    const Color border = focused ? theme->accent
+                                 : (inter.hovered ? theme->border_strong : theme->border);
+    ui_rect(arena, ctx, r, bg, theme->radius_sm);
+    ui_rect_border(arena, ctx, r, border, theme->radius_sm, focused ? 1.5f : 1.0f);
+
+    const Rect inner{r.x + 1.0f, r.y + 1.0f,
+                     std::max(0.0f, r.w - 2.0f), std::max(0.0f, r.h - 2.0f)};
+    ui_clip(arena, ctx, inner);
+
+    const float text_x = r.x + kEditPadX - st->scroll;
+    const float text_y = r.y + (r.h - font_line_height(size)) * 0.5f;
+
+    if (lo != hi) {
+        const float x0 = text_x + edit_prefix_width(buf, static_cast<size_t>(lo), size, weight);
+        const float x1 = text_x + edit_prefix_width(buf, static_cast<size_t>(hi), size, weight);
+        ui_rect(arena, ctx, Rect{x0, r.y + 4.0f, x1 - x0, std::max(0.0f, r.h - 8.0f)},
+                Color{theme->accent.r, theme->accent.g, theme->accent.b, 80}, 2.0f);
+    }
+
+    if (len == 0 && placeholder) {
+        ui_text(arena, ctx, text_x, text_y, placeholder, theme->text_dim, size, weight);
+    } else if (len > 0) {
+        ui_text(arena, ctx, text_x, text_y, buf, theme->text, size, weight);
+    }
+
+    if (focused && std::fmod(ctx->time_seconds, 1.0f) < 0.5f) {
+        ui_rect(arena, ctx, Rect{text_x + caret_x, r.y + 5.0f, 1.5f,
+                                 std::max(0.0f, r.h - 10.0f)}, theme->text, 0.75f);
+    }
+
+    ui_clip(arena, ctx, Rect{0.0f, 0.0f, ctx->screen_w, ctx->screen_h});
+
+    if (submitted) return UITextEditResult::Submitted;
+    if (changed) return UITextEditResult::Changed;
+    return UITextEditResult::None;
+}
+
+bool ui_slider(Arena* arena, UIContext* ctx, Rect r, float* value, float min, float max,
+               const Theme* theme, uint64_t id) {
+    if (!ctx || !value) return false;
+    if (!theme) theme = ctx->theme ? ctx->theme : &theme_faceforge();
+    if (!id) id = ui_get_id_rect(ctx, r);
+
+    const UIInteraction inter = ui_process_interaction(
+        ctx, id, r, UIBehavior{UIClickTrigger::OnDown, false});
+
+    const float span = max - min;
+    bool changed = false;
+    if ((inter.down || inter.dragging) && span > 0.0f && r.w > 0.0f) {
+        const float frac = std::clamp((ctx->mouse_x - r.x) / r.w, 0.0f, 1.0f);
+        const float nv = min + frac * span;
+        if (std::fabs(nv - *value) > 1e-6f) {
+            *value = nv;
+            changed = true;
+        }
+    }
+
+    const float frac = (span > 0.0f)
+        ? std::clamp((*value - min) / span, 0.0f, 1.0f) : 0.0f;
+    const float cy = r.y + r.h * 0.5f;
+    const float track_h = 4.0f;
+    ui_rect(arena, ctx, Rect{r.x, cy - track_h * 0.5f, r.w, track_h},
+            theme->bg_control, track_h * 0.5f);
+    if (frac > 0.0f) {
+        ui_rect(arena, ctx, Rect{r.x, cy - track_h * 0.5f, r.w * frac, track_h},
+                theme->accent, track_h * 0.5f);
+    }
+    const float kr = 6.0f;
+    const float kx = r.x + r.w * frac;
+    const Color knob = (inter.hovered || inter.dragging || inter.down)
+        ? theme->accent_hover : theme->accent;
+    ui_rect(arena, ctx, Rect{kx - kr, cy - kr, kr * 2.0f, kr * 2.0f}, knob, kr);
+
+    return changed;
+}
+
 void ui_progress(Arena* arena, UIContext* ctx, Rect r, float fraction,
                  Color bg, Color fill) {
     fraction = std::clamp(fraction, 0.0f, 1.0f);

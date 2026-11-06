@@ -19,6 +19,18 @@ struct Window {
     double scroll_y = 0.0;
     GLFWcursor* cursor_arrow = nullptr;
     GLFWcursor* cursor_resize = nullptr;
+
+    // Input queues filled by GLFW callbacks and drained by feed_ui_input.
+    static constexpr int kQueueCap = 64;
+    static constexpr int kMaxDrops = 8;
+    static constexpr int kDropPathLen = 512;
+    KeyEvent key_queue[kQueueCap] = {};
+    int key_count = 0;
+    uint32_t char_queue[kQueueCap] = {};
+    int char_count = 0;
+    char drop_buf[kMaxDrops][kDropPathLen] = {};
+    const char* drop_ptrs[kMaxDrops] = {};
+    int drop_count = 0;
 };
 
 namespace {
@@ -26,6 +38,30 @@ namespace {
 void on_scroll(GLFWwindow* handle, double /*xoffset*/, double yoffset) {
     auto* w = static_cast<Window*>(glfwGetWindowUserPointer(handle));
     if (w) w->scroll_y += yoffset;
+}
+
+void on_key(GLFWwindow* handle, int key, int /*scancode*/, int action, int mods) {
+    auto* w = static_cast<Window*>(glfwGetWindowUserPointer(handle));
+    if (w && w->key_count < Window::kQueueCap) {
+        w->key_queue[w->key_count++] = KeyEvent{key, action, mods};
+    }
+}
+
+void on_char(GLFWwindow* handle, unsigned int codepoint) {
+    auto* w = static_cast<Window*>(glfwGetWindowUserPointer(handle));
+    if (w && w->char_count < Window::kQueueCap) {
+        w->char_queue[w->char_count++] = codepoint;
+    }
+}
+
+void on_drop(GLFWwindow* handle, int count, const char** paths) {
+    auto* w = static_cast<Window*>(glfwGetWindowUserPointer(handle));
+    if (!w) return;
+    for (int i = 0; i < count && w->drop_count < Window::kMaxDrops; ++i) {
+        std::snprintf(w->drop_buf[w->drop_count], Window::kDropPathLen, "%s", paths[i]);
+        w->drop_ptrs[w->drop_count] = w->drop_buf[w->drop_count];
+        ++w->drop_count;
+    }
 }
 
 int to_glfw_key(Key key) {
@@ -99,6 +135,9 @@ Window* create(const WindowDesc& desc) {
     w->cursor_resize = glfwCreateStandardCursor(GLFW_RESIZE_NWSE_CURSOR);
     glfwSetWindowUserPointer(handle, w);
     glfwSetScrollCallback(handle, on_scroll);
+    glfwSetKeyCallback(handle, on_key);
+    glfwSetCharCallback(handle, on_char);
+    glfwSetDropCallback(handle, on_drop);
     return w;
 }
 
@@ -153,6 +192,49 @@ double scroll_poll(Window* window) {
 bool key_pressed(Window* window, Key key) {
     if (!window) return false;
     return glfwGetKey(window->handle, to_glfw_key(key)) == GLFW_PRESS;
+}
+
+bool key_raw_down(Window* window, int glfw_key) {
+    if (!window) return false;
+    return glfwGetKey(window->handle, glfw_key) == GLFW_PRESS;
+}
+
+int poll_key_events(Window* window, KeyEvent* out, int max) {
+    if (!window || !out || max <= 0) return 0;
+    const int n = std::min(window->key_count, max);
+    for (int i = 0; i < n; ++i) out[i] = window->key_queue[i];
+    for (int i = n; i < window->key_count; ++i) window->key_queue[i - n] = window->key_queue[i];
+    window->key_count -= n;
+    return n;
+}
+
+int poll_chars(Window* window, uint32_t* out, int max) {
+    if (!window || !out || max <= 0) return 0;
+    const int n = std::min(window->char_count, max);
+    for (int i = 0; i < n; ++i) out[i] = window->char_queue[i];
+    for (int i = n; i < window->char_count; ++i) window->char_queue[i - n] = window->char_queue[i];
+    window->char_count -= n;
+    return n;
+}
+
+int poll_drops(Window* window, const char** out, int max) {
+    if (!window || !out || max <= 0) return 0;
+    const int n = std::min(window->drop_count, max);
+    for (int i = 0; i < n; ++i) out[i] = window->drop_ptrs[i];
+    for (int i = n; i < window->drop_count; ++i) {
+        window->drop_ptrs[i - n] = window->drop_ptrs[i];
+    }
+    window->drop_count -= n;
+    return n;
+}
+
+const char* clipboard_get_text(Window* window) {
+    if (!window) return nullptr;
+    return glfwGetClipboardString(window->handle);
+}
+
+void clipboard_set_text(Window* window, const char* text) {
+    if (window) glfwSetClipboardString(window->handle, text ? text : "");
 }
 
 void minimize(Window* window) { if (window) glfwIconifyWindow(window->handle); }

@@ -3,6 +3,8 @@
 #include "core/theme.hpp"
 #include "core/types.hpp"
 
+#include <cstddef>
+
 struct LayoutContext {
     Rect bounds;
     float current_y;
@@ -192,6 +194,23 @@ bool ui_toggle(Arena* arena, UIContext* ctx, Rect r, bool* value,
                const Theme* theme);
 bool ui_text_input(Arena* arena, UIContext* ctx, Rect r, const char* text,
                    Color bg, Color border, const Theme* theme);
+
+// ---- Editable text & slider ----------------------------------------------
+enum class UITextEditResult : uint8_t { None, Changed, Submitted };
+
+// Editable single-line text field. `buf`/`cap` are app-owned; the widget edits
+// in place and returns Changed when the text changes, Submitted on Enter.
+// Focus, caret, selection and horizontal scroll persist in ctx->input, keyed by
+// `id`. Pass a stable id when several fields share the same rect. `theme`
+// defaults to ctx->theme.
+UITextEditResult ui_text_edit(Arena* arena, UIContext* ctx, Rect r, char* buf, size_t cap,
+                              const Theme* theme, const char* placeholder = nullptr,
+                              uint64_t id = 0);
+
+// Horizontal slider over [min,max]. Updates *value while pressed/dragged and
+// returns true on the frames where it changed.
+bool ui_slider(Arena* arena, UIContext* ctx, Rect r, float* value, float min, float max,
+               const Theme* theme, uint64_t id = 0);
 void ui_progress(Arena* arena, UIContext* ctx, Rect r, float fraction,
                  Color bg, Color fill);
 void ui_stat_row(Arena* arena, UIContext* ctx, Rect r, const char* label,

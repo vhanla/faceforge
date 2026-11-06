@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace platform {
 
 struct Window;
@@ -20,10 +22,32 @@ struct WindowDesc {
 
 enum class Key { Escape, F2, F3, Space, Enter };
 
+// Raw key event: `action` is 0 = release, 1 = press, 2 = repeat (matches GLFW);
+// `key` is a GLFW key code; `mods` is a GLFW modifier bitmask. Drained by
+// platform::feed_ui_input.
+struct KeyEvent {
+    int key;
+    int action;
+    int mods;
+};
+
 Window* create(const WindowDesc& desc);
 void destroy(Window* window);
 
 void poll_events();
+
+// Event queues, drained once per frame (by feed_ui_input). Each returns the
+// number written to `out` (up to `max`).
+int poll_key_events(Window* window, KeyEvent* out, int max);
+int poll_chars(Window* window, uint32_t* out, int max);
+// Dropped file paths since the last call; owned by the platform and valid until
+// the next poll_events.
+int poll_drops(Window* window, const char** out, int max);
+
+// Clipboard text. The pointer from clipboard_get_text is owned by GLFW and
+// valid until the next clipboard call or window destruction.
+const char* clipboard_get_text(Window* window);
+void clipboard_set_text(Window* window, const char* text);
 bool should_close(Window* window);
 void set_should_close(Window* window);
 void swap_buffers(Window* window);
@@ -37,6 +61,8 @@ bool mouse_right_down(Window* window);
 // Returns the accumulated scroll-wheel delta since the last call and resets it.
 double scroll_poll(Window* window);
 bool key_pressed(Window* window, Key key);
+// Raw GLFW key state (GLFW_KEY_*), for modifiers and text-edit keys.
+bool key_raw_down(Window* window, int glfw_key);
 
 void minimize(Window* window);
 void toggle_maximize(Window* window);

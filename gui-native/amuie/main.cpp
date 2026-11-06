@@ -3,6 +3,7 @@
 #include "core/theme.hpp"
 #include "core/types.hpp"
 #include "demo/faceforge.hpp"
+#include "platform/input.hpp"
 #include "platform/window.hpp"
 #include "widgets/ui_widgets.hpp"
 
@@ -99,6 +100,7 @@ int main(int argc, char** argv) {
 
     while (!platform::should_close(window)) {
         platform::poll_events();
+        platform::feed_ui_input(window, &ui);
 
         const bool esc_down = platform::key_pressed(window, platform::Key::Escape);
         if (esc_down && !prev_esc_down) {
@@ -209,6 +211,11 @@ int main(int argc, char** argv) {
 
         demo_draw(&frame_arena, &ui, demo);
         ui_end_frame(&frame_arena, &ui);
+
+        // Text widgets may have requested a clipboard write (copy/cut).
+        if (ui.input.clipboard_out) {
+            platform::clipboard_set_text(window, ui.input.clipboard_out);
+        }
 
         switch (demo->window_action) {
             case WindowAction::Minimize: platform::minimize(window); break;

@@ -18,6 +18,7 @@ add_library(amuie STATIC
     "${AMUIE_DIR}/core/font.cpp"
     "${AMUIE_DIR}/widgets/ui_widgets.cpp"
     "${AMUIE_DIR}/platform/window.cpp"
+    "${AMUIE_DIR}/platform/input.cpp"
     "${AMUIE_DIR}/backend/opengl3_backend.cpp"
     "${AMUIE_DIR}/assets/font_atlas.cpp"
     "${AMUIE_DIR}/demo/faceforge.cpp"
@@ -36,6 +37,19 @@ endif()
 if(NOT MSVC)
     target_compile_options(amuie PRIVATE -Wall -Wextra)
 endif()
+
+# ---- Headless widget tests (no window / GL context needed) -----------------
+add_executable(amuie-tests "${CMAKE_CURRENT_SOURCE_DIR}/amuie-tests/test_suite.cpp")
+target_link_libraries(amuie-tests PRIVATE amuie)
+# Release builds define NDEBUG, which would silently strip the assert-based
+# checks in the suite; keep them active for this target.
+if(MSVC)
+    target_compile_options(amuie-tests PRIVATE /UNDEBUG)
+else()
+    target_compile_options(amuie-tests PRIVATE -Wall -Wextra -UNDEBUG)
+endif()
+enable_testing()
+add_test(NAME amuie-tests COMMAND amuie-tests)
 
 # ---- FaceForge core (C ABI) ------------------------------------------------
 # Build the root project first (`cmake --build build`); this target only links.

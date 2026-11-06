@@ -401,7 +401,8 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layout
     // Output
     float oy2 = sy + 120.0f;
     section_header(a, ctx, t, x, oy2, ICON_FOLDER_FILLED, "Output");
-    ui_text_input(a, ctx, Rect{x + 21.0f, oy2 + 26.0f, 213.0f, 32.0f}, state->output_path, t.bg_app, t.border, &t);
+    ui_text_edit(a, ctx, Rect{x + 21.0f, oy2 + 26.0f, 213.0f, 32.0f}, state->output_path,
+                 sizeof(state->output_path), &t);
     const Rect fld_r{x + 234.0f, oy2 + 26.0f, 32.0f, 32.0f};
     ui_rect(a, ctx, fld_r, t.bg_control, 6.0f);
     ui_icon_center(a, ctx, fld_r, ICON_FOLDER_FILLED, t.text, 20.0f);
@@ -988,7 +989,8 @@ void video_right_sidebar(Arena* a, UIContext* ctx, DemoState* state, const Layou
                         t.bg_control, 5.0f, 0.0f, 12.0f, false, tone_control_text(t));
     cur_y += 36.0f;
 
-    ui_text_input(a, ctx, Rect{rx + 12.0f, cur_y, w - 24.0f, 28.0f}, state->video_path, t.bg_app, t.border, &t);
+    ui_text_edit(a, ctx, Rect{rx + 12.0f, cur_y, w - 24.0f, 28.0f}, state->video_path,
+                 sizeof(state->video_path), &t);
     cur_y += 42.0f;
 
     ui_separator(a, ctx, rx + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));

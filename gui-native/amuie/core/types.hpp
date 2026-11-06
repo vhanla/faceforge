@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include "core/input.hpp"
 
 struct Theme;
 
@@ -83,4 +84,7 @@ struct UIContext {
     // ID scope stack:
     uint64_t id_stack[16] = {};
     int id_stack_depth = 0;
+
+    // Keyboard/text/clipboard/drag-and-drop state (see core/input.hpp).
+    UIInput input;
 };

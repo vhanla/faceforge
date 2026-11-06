@@ -373,11 +373,136 @@ static void test_context_menu() {
     std::printf("  -> Context menu tests PASSED!\n");
 }
 
+// ---- Editable text field -------------------------------------------------
+
+static void clear_frame_input(UIInput& in) {
+    in.char_count = 0;
+    in.key_backspace = in.key_delete = 0;
+    in.key_left = in.key_right = in.key_home = in.key_end = 0;
+    in.key_enter = in.key_escape = in.key_tab = 0;
+    in.key_shift = in.key_ctrl = 0;
+    in.key_a = in.key_c = in.key_v = in.key_x = 0;
+    in.clipboard = nullptr;
+    in.clipboard_out = nullptr;
+    in.dropped_count = 0;
+}
+
+static void test_text_edit() {
+    std::printf("Testing editable text field...\n");
+
+    Arena arena = Arena::create(1024 * 1024);
+    UIContext ui;
+    ui.screen_w = 800;
+    ui.screen_h = 600;
+
+    const Rect field{100, 100, 200, 30};
+    char buf[64];
+    std::strcpy(buf, "hello");
+
+    auto frame = [&]() {
+        ui_end_frame(&arena, &ui);
+        arena.reset();
+        clear_frame_input(ui.input);
+        ui.mouse_left_clicked = false;
+        ui.mouse_left_released = false;
+        ui.mouse_left_down = false;
+    };
+
+    // Click at the right edge: focus and caret to end.
+    ui.mouse_x = field.x + field.w - 2.0f;
+    ui.mouse_y = field.y + field.h * 0.5f;
+    ui.mouse_left_down = true;
+    ui.mouse_left_clicked = true;
+    UITextEditResult r = ui_text_edit(&arena, &ui, field, buf, sizeof(buf), nullptr, "path");
+    assert(r == UITextEditResult::None);
+    assert(ui.input.focused_id != 0);
+    frame();
+
+    // Type "X".
+    ui.input.characters[0] = 'X';
+    ui.input.char_count = 1;
+    r = ui_text_edit(&arena, &ui, field, buf, sizeof(buf), nullptr, "path");
+    assert(r == UITextEditResult::Changed);
+    assert(std::strcmp(buf, "helloX") == 0);
+    frame();
+
+    // Backspace removes it.
+    ui.input.key_backspace = 1;
+    r = ui_text_edit(&arena, &ui, field, buf, sizeof(buf), nullptr, "path");
+    assert(r == UITextEditResult::Changed);
+    assert(std::strcmp(buf, "hello") == 0);
+    frame();
+
+    // Select all and copy.
+    ui.input.key_a = 1;
+    ui_text_edit(&arena, &ui, field, buf, sizeof(buf), nullptr, "path");
+    frame();
+    ui.input.key_c = 1;
+    ui_text_edit(&arena, &ui, field, buf, sizeof(buf), nullptr, "path");
+    assert(ui.input.clipboard_out != nullptr);
+    assert(std::strcmp(ui.input.clipboard_out, "hello") == 0);
+    frame();
+
+    // Paste replaces the still-active selection.
+    ui.input.clipboard = "pasted";
+    ui.input.key_v = 1;
+    r = ui_text_edit(&arena, &ui, field, buf, sizeof(buf), nullptr, "path");
+    assert(r == UITextEditResult::Changed);
+    assert(std::strcmp(buf, "pasted") == 0);
+    frame();
+
+    // Escape drops focus without touching the buffer.
+    ui.input.key_escape = 1;
+    ui_text_edit(&arena, &ui, field, buf, sizeof(buf), nullptr, "path");
+    assert(ui.input.focused_id == 0);
+    assert(std::strcmp(buf, "pasted") == 0);
+    frame();
+
+    arena.destroy();
+    std::printf("  -> Text edit tests PASSED!\n");
+}
+
+static void test_slider() {
+    std::printf("Testing slider...\n");
+
+    Arena arena = Arena::create(1024 * 1024);
+    UIContext ui;
+    ui.screen_w = 800;
+    ui.screen_h = 600;
+
+    const Rect track{100, 200, 200, 24};
+    float value = 0.0f;
+
+    ui.mouse_x = track.x + track.w * 0.5f;
+    ui.mouse_y = track.y + track.h * 0.5f;
+    ui.mouse_left_down = true;
+    ui.mouse_left_clicked = true;
+    bool changed = ui_slider(&arena, &ui, track, &value, 0.0f, 1.0f, nullptr);
+    assert(changed);
+    assert(value > 0.49f && value < 0.51f);
+    ui_end_frame(&arena, &ui);
+    arena.reset();
+
+    // Drag to the far right.
+    ui.mouse_left_clicked = false;
+    ui.mouse_x = track.x + track.w;
+    changed = ui_slider(&arena, &ui, track, &value, 0.0f, 1.0f, nullptr);
+    assert(changed);
+    assert(value > 0.99f);
+    ui_end_frame(&arena, &ui);
+    arena.reset();
+
+    arena.destroy();
+    std::printf("  -> Slider tests PASSED!\n");
+}
+
 int main() {
     std::printf("=== AMUIE INTERACTION & POPUP TEST SUITE ===\n");
     test_click_lifecycle();
     test_combobox();
     test_context_menu();
+    test_text_edit();
+    test_slider();
     std::printf("=== ALL TESTS PASSED SUCCESSFULLY! ===\n");
     return 0;
 }

@@ -7,12 +7,14 @@ instead of Zig.
 
 ```
 gui-native/
-  amuie/          vendored AMUIE library (from ../arenaui/src), one local patch:
-                  CMD_DRAW_TEXTURE + OpenGL texture registry + ui_image()
+  amuie/          vendored AMUIE library (from ../arenaui/src) plus local
+                  additions: texture support (CMD_DRAW_TEXTURE + OpenGL
+                  registry + ui_image) and editable widgets (ui_text_edit,
+                  ui_slider) with a platform input bridge
   amuie-tools/    asset baker + icon SVGs (regenerate the font atlas)
-  amuie-tests/    library unit tests
+  amuie-tests/    library unit tests (headless; run with `amuie-tests`)
   app/            FaceForge entry points (currently the spike)
-  CMakeLists.txt  builds `amuie` and the spike
+  CMakeLists.txt  builds `amuie`, the spike and the test binary
 ```
 
 `amuie/main.cpp` is the upstream library's demo entry point (kept for
@@ -54,9 +56,15 @@ resolve:
 `--help` lists `--image`, `--screenshot`, `--frames`, `--size WxH`, `--light`
 and `--video`.
 
-### Local patch to the vendor
+Note that `ui_text_edit` edits an app-owned buffer in place, so a widget pass
+must run each frame for the field to keep its focus, caret and selection. This
+is why the `UIContext` is created once outside the loop in the entry points.
 
-The only functional change over `../arenaui/src` is texture support:
+### Local changes to the vendor
+
+Over `../arenaui/src` this branch adds two features:
+
+Texture support:
 
 - `core/types.hpp`: `CMD_DRAW_TEXTURE` plus `texture_id`/`uv` on `RenderCommand`.
 - `backend/renderer_interface.hpp`: `create_texture_bgr` / `destroy_texture` /
@@ -65,5 +73,18 @@ The only functional change over `../arenaui/src` is texture support:
   shader mode 4. Uploads are a cold path (once per image, not per frame).
 - `widgets/ui_widgets.*`: `ui_image()` / `ui_image_uv()`.
 - `demo/faceforge.*`: optional `DemoState::canvas_tex` drawn contain-fit.
+
+Editable text, slider and input plumbing:
+
+- `core/input.hpp`: `UIInput` (keyboard/text/clipboard/drag-drop) and the
+  persistent per-field `UITextEditState` table; `UIContext` gains `input`.
+- `platform/window.*`: GLFW key/char/drop callbacks and queues, `key_raw_down`,
+  and clipboard get/set.
+- `platform/input.*`: `platform::feed_ui_input(window, &ui)` drains the queues
+  into `ui.input`, resetting the per-frame fields; call it after
+  `poll_events()`.
+- `widgets/ui_widgets.*`: `ui_text_edit()` (UTF-8, selection, Ctrl+A/C/V/X,
+  caret blink, horizontal scroll, per-id focus) and `ui_slider()`.
+- `demo/faceforge.*`: the Output and video path fields are editable.
 
 Keep `amuie/` and upstream in sync by hand when re-vendoring.
