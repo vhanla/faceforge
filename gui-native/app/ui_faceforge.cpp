@@ -400,7 +400,10 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
 
     const float footer_h = 68.0f;
     const float scroll_view_bottom = view_bottom - footer_h;
-    const float content_bottom = 900.0f;
+    // The expanded Studio panel adds ~250 px of controls plus the shifted Output
+    // section, so give the scroll range room for it.
+    const bool studio_open = app && app->studio;
+    const float content_bottom = studio_open ? 1360.0f : 900.0f;
     const float max_scroll = std::max(0.0f, content_bottom - (scroll_view_bottom - view_y));
     state->left_scroll = std::clamp(state->left_scroll, 0.0f, max_scroll);
     const float oy = view_y + 12.0f - state->left_scroll;
@@ -535,15 +538,124 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     // Studio
     float sy = hy + 160.0f;
     section_header(a, ctx, t, x, sy, ICON_BOX_FILLED, "Studio");
-    if (ui_button_icon_text(a, ctx, Rect{x + 21.0f, sy + 28.0f, 245.0f, 36.0f}, ICON_EXTERNAL, "Open Studio",
-                            t.bg_control, 7.0f, 16.0f, 14.0f, true, tone_control_text(t))) {
-        if (app) app->setStatus("Studio is not wired in the native UI yet", true);
-    }
-    ui_text(a, ctx, x + 21.0f, sy + 70.0f, "Paint the original back over the result.", t.text_muted, 13.0f);
-    ui_text(a, ctx, x + 21.0f, sy + 87.0f, "Erase added hair, blemishes, halos...", t.text_dim, 13.0f);
 
-    // Output
-    float oy2 = sy + 120.0f;
+    if (studio_open) {
+        const float b = 245.0f;
+        const Rect close_r{x + 21.0f, sy + 30.0f, b * 0.52f, 36.0f};
+        if (ui_button_icon_text(a, ctx, close_r, ICON_X, "Close", t.bg_control, 7.0f, 14.0f,
+                                14.0f, true, tone_control_text(t))) {
+            if (app) { app->studio = false; app->clearStudio(); }
+        }
+        const Rect clear_r{x + 21.0f + b * 0.52f, sy + 30.0f, b * 0.46f, 36.0f};
+        if (ui_button_icon_text(a, ctx, clear_r, ICON_TRASH, "Clear retouch", t.bg_control, 7.0f,
+                                14.0f, 13.0f, true, tone_control_text(t))) {
+            if (app) { app->studioReset(); }
+        }
+
+        // Erase / Restore mode.
+        const float cy = sy + 110.0f;
+        ui_text(a, ctx, x + 21.0f, cy + 4.0f, "Mode", t.text, 13.5f, 2);
+        const float bx = x + 21.0f;
+        const Color mode_col = tone_control_text(t);
+        const uint64_t er_id = ui_hash_str("studio_erase");
+        const UIInteraction er_in =
+            ui_process_interaction(ctx, er_id, Rect{bx, cy + 4.0f, 56.0f, 30.0f});
+        if (er_in.clicked) {
+            if (app) { app->studio_erase = true; app->invalidateView(); }
+        }
+        ui_rect(a, ctx, Rect{bx, cy + 4.0f, 56.0f, 30.0f},
+                er_in.hovered || er_in.pressed ? t.accent : t.bg_control, 6.0f);
+        ui_text_center(a, ctx, Rect{bx, cy + 4.0f, 56.0f, 30.0f}, "Erase",
+                       (er_in.hovered || er_in.pressed) ? t.on_accent : mode_col, 13.0f, 1);
+        const uint64_t re_id = ui_hash_str("studio_restore");
+        const UIInteraction re_in = ui_process_interaction(ctx, re_id,
+                                                           Rect{bx + 58.0f, cy + 4.0f, 68.0f, 30.0f});
+        if (re_in.clicked) {
+            if (app) { app->studio_erase = false; app->invalidateView(); }
+        }
+        ui_rect(a, ctx, Rect{bx + 58.0f, cy + 4.0f, 68.0f, 30.0f},
+                re_in.hovered || re_in.pressed ? t.accent : t.bg_control, 6.0f);
+        ui_text_center(a, ctx, Rect{bx + 58.0f, cy + 4.0f, 68.0f, 30.0f}, "Restore",
+                       (re_in.hovered || re_in.pressed) ? t.on_accent : mode_col, 13.0f, 1);
+        ui_rect_border(a, ctx, Rect{bx, cy + 4.0f, 128.0f, 30.0f}, t.border, 6.0f, 1.0f);
+
+        // Size, hardness, opacity sliders.
+        const float s = sy + 182.0f;
+        ui_text(a, ctx, x + 21.0f, s + 4.0f, "Brush size", t.text, 13.5f, 2);
+        const Rect size_r{bx, s + 26.0f, 210.0f, 24.0f};
+        if (app) {
+            const bool changed = ui_slider(a, ctx, size_r, &app->studio_size, 2.0f, 200.0f, &t);
+            if (changed) app->invalidateView();
+        }
+        ui_text(a, ctx, bx + 220.0f, s + 28.0f, arena_fmt(a, "%.0f px", app ? app->studio_size : 60.0f),
+                t.text_dim, 12.5f);
+
+        const float h = sy + 222.0f;
+        ui_text(a, ctx, x + 21.0f, h + 4.0f, "Hardness", t.text, 13.5f, 2);
+        const Rect hard_r{bx, h + 26.0f, 210.0f, 24.0f};
+        if (app) {
+            const bool changed = ui_slider(a, ctx, hard_r, &app->studio_hard, 0.0f, 1.0f, &t);
+            if (changed) app->invalidateView();
+        }
+        ui_text(a, ctx, bx + 220.0f, h + 28.0f, arena_fmt(a, "%.2f", app ? app->studio_hard : 0.6f),
+                t.text_dim, 12.5f);
+
+        const float o = sy + 262.0f;
+        ui_text(a, ctx, x + 21.0f, o + 4.0f, "Opacity", t.text, 13.5f, 2);
+        const Rect op_r{bx, o + 26.0f, 210.0f, 24.0f};
+        if (app) {
+            const bool changed = ui_slider(a, ctx, op_r, &app->studio_opac, 0.01f, 1.0f, &t);
+            if (changed) app->invalidateView();
+        }
+        ui_text(a, ctx, bx + 220.0f, o + 28.0f, arena_fmt(a, "%.2f", app ? app->studio_opac : 0.9f),
+                t.text_dim, 12.5f);
+
+        // View options.
+        const float v = sy + 302.0f;
+        ui_text(a, ctx, x + 21.0f, v + 4.0f, "View", t.text, 13.5f, 2);
+        if (app) {
+            if (ui_checkbox(a, ctx, bx, v + 26.0f, "Show retouch mask", &app->studio_show_mask, &t)) {
+                app->invalidateView();
+            }
+            if (ui_checkbox(a, ctx, bx, v + 56.0f, "View original", &app->studio_view_original, &t)) {
+                app->invalidateView();
+            }
+        }
+
+        // Undo / redo + stroke counts.
+        const float u = sy + 392.0f;
+        ui_text(a, ctx, x + 21.0f, u + 4.0f, "Retouch history", t.text, 13.5f, 2);
+        const Rect ub{bx, u + 26.0f, 98.0f, 34.0f};
+        if (ui_button_icon_text(a, ctx, ub, ICON_UNDO, "Undo", t.bg_control, 7.0f, 13.0f, 13.0f, true,
+                                tone_control_text(t), Color{}, 7.0f)) {
+            if (app) app->maskUndo();
+        }
+        if (ui_button_icon_text(a, ctx, Rect{bx + 102.0f, u + 26.0f, 98.0f, 34.0f}, ICON_REDO, "Redo",
+                                t.bg_control, 7.0f, 13.0f, 13.0f, true, tone_control_text(t),
+                                Color{}, 7.0f)) {
+            if (app) app->maskRedo();
+        }
+        ui_text(a, ctx, bx, u + 66.0f,
+                arena_fmt(a, "undone %d  \xC2\xB7  undone later %d", app ? app->mask_undo_len : 0,
+                          app ? app->mask_redo_len : 0),
+                t.text_dim, 12.0f);
+    } else {
+        if (ui_button_icon_text(a, ctx, Rect{x + 21.0f, sy + 30.0f, 245.0f, 36.0f}, ICON_SCAN_FACE_FILLED,
+                                "Open Studio", t.bg_control, 7.0f, 16.0f, 14.0f, true,
+                                tone_control_text(t))) {
+            if (app) {
+                app->studio = true;
+                app->studioEnsureMask();
+            }
+        }
+        ui_text(a, ctx, x + 21.0f, sy + 70.0f, "Paint the original back over the result.",
+                t.text_muted, 13.0f);
+        ui_text(a, ctx, x + 21.0f, sy + 87.0f, "Erase added hair, blemishes, halos...", t.text_dim,
+                13.0f);
+    }
+
+    // Output (shifted down when the Studio panel is open).
+    float oy2 = studio_open ? sy + 500.0f : sy + 120.0f;
     section_header(a, ctx, t, x, oy2, ICON_FOLDER_FILLED, "Output");
     const UITextEditResult ed = ui_text_edit(a, ctx, Rect{x + 21.0f, oy2 + 26.0f, 213.0f, 32.0f},
                                              state->output_path, sizeof(state->output_path), &t,
@@ -657,46 +769,110 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     const Rect canvas{L.canvas_x, L.canvas_y, L.canvas_w, L.canvas_h};
     ui_dashed_rect(a, ctx, canvas, color_alpha(t.border, 0xd0), 5.0f, 4.0f);
 
-    const uint64_t canvas_menu_id = ui_hash_str("canvas_ctx_menu");
-    ui_context_menu_area(ctx, canvas_menu_id, canvas);
+    // Image canvas.
+    const bool studio = app ? app->studio : false;
 
-    static const MenuItem kCanvasMenuItems[] = {
-        { .label = "Paste target", .icon = ICON_CLIPBOARD, .shortcut = "Ctrl+V" },
-        { .label = "Open target...", .icon = ICON_IMAGE_PLUS, .shortcut = "Ctrl+O" },
-        { .separator = true },
-        { .label = "Reset View / Fit", .icon = ICON_ROTATE_CCW },
-        { .label = "1:1 Pixel View", .icon = ICON_MONITOR },
-        { .separator = true },
-        { .label = "Clear Canvas", .icon = ICON_TRASH }
-    };
-    const int menu_pick = ui_context_menu(a, ctx, canvas_menu_id, kCanvasMenuItems, 7, &t);
-    if (menu_pick == 1) {
-        if (app) {
-            const std::string p = platform::open_file_dialog(
-                "Open target image", "*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff",
-                app->target_path.c_str());
-            if (!p.empty()) {
-                app->openTarget(p);
-                state->sync_output_path = true;
+    // The right-click canvas menu is disabled while Studio painting owns the
+    // right button (it toggles the brush).
+    const uint64_t canvas_menu_id = ui_hash_str("canvas_ctx_menu");
+    if (!studio) {
+        ui_context_menu_area(ctx, canvas_menu_id, canvas);
+
+        static const MenuItem kCanvasMenuItems[] = {
+            { .label = "Paste target", .icon = ICON_CLIPBOARD, .shortcut = "Ctrl+V" },
+            { .label = "Open target...", .icon = ICON_IMAGE_PLUS, .shortcut = "Ctrl+O" },
+            { .separator = true },
+            { .label = "Reset View / Fit", .icon = ICON_ROTATE_CCW },
+            { .label = "1:1 Pixel View", .icon = ICON_MONITOR },
+            { .separator = true },
+            { .label = "Clear Canvas", .icon = ICON_TRASH }
+        };
+        const int menu_pick = ui_context_menu(a, ctx, canvas_menu_id, kCanvasMenuItems, 7, &t);
+        if (menu_pick == 1) {
+            if (app) {
+                const std::string p = platform::open_file_dialog(
+                    "Open target image", "*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff",
+                    app->target_path.c_str());
+                if (!p.empty()) {
+                    app->openTarget(p);
+                    state->sync_output_path = true;
+                }
             }
+        } else if (menu_pick == 3) {
+            state->fit = true;
+            state->zoom = 1.0f;
+        } else if (menu_pick == 4) {
+            state->fit = false;
+            state->zoom = 1.0f;
+        } else if (menu_pick == 6) {
+            if (app) app->clearTarget();
         }
-    } else if (menu_pick == 3) {
-        state->fit = true;
-        state->zoom = 1.0f;
-    } else if (menu_pick == 4) {
-        state->fit = false;
-        state->zoom = 1.0f;
-    } else if (menu_pick == 6) {
-        if (app) app->clearTarget();
     }
 
-    // Image canvas. The composed result is shown by default; "Original" swaps in
-    // the pristine base, and the base is also used as a fallback until the first
-    // job produces a result. The rect is sized from the base image so the face
-    // overlay (stored in base pixels) maps correctly even at preview resolution.
+    // Studio painting: capture mouse state on the canvas, map screen -> base
+    // pixels, and paint into the mask on left drag; right-click toggles the
+    // Erase / Restore brush mode.
+    static bool paint_drag = false;
+    static float paint_last_x = 0.0f;
+    static float paint_last_y = 0.0f;
+    if (studio) {
+        const bool mouse_in = ctx->mouse_x >= canvas.x && ctx->mouse_x <= canvas.x + canvas.w &&
+                              ctx->mouse_y >= canvas.y && ctx->mouse_y <= canvas.y + canvas.h;
+        const bool is_left_down = ctx->mouse_left_down || paint_drag;
+        const bool is_left_released = ctx->mouse_left_released;
+
+        // Toggle brush mode on the right-click edge (not while dragging left).
+        if (ctx->mouse_right_clicked && !paint_drag && mouse_in) {
+            if (app) {
+                app->studio_erase = !app->studio_erase;
+                app->invalidateView();
+            }
+        }
+
+        if (is_left_down && !paint_drag) {
+            paint_drag = true;
+            paint_last_x = 0.0f;
+            paint_last_y = 0.0f;
+        }
+        if (is_left_released && paint_drag) {
+            if (app) app->studioEnd();
+            paint_drag = false;
+            paint_last_x = 0.0f;
+            paint_last_y = 0.0f;
+        }
+        if (paint_drag && app && app->base.valid()) {
+            const float ref_w = static_cast<float>(app->base.width);
+            const float ref_h = static_cast<float>(app->base.height);
+            const float px = (ctx->mouse_x - canvas.x) / canvas.w * ref_w;
+            const float py = (ctx->mouse_y - canvas.y) / canvas.h * ref_h;
+            if (paint_last_x != 0.0f || paint_last_y != 0.0f) {
+                app->studioTo(px, py);
+            } else {
+                app->studioBegin(px, py);
+            }
+            paint_last_x = px;
+            paint_last_y = py;
+        }
+        if (!mouse_in && paint_drag) {
+            if (app) app->studioEnd();
+            paint_drag = false;
+        }
+    }
+
+    // In Studio the result texture already carries the retouch blend (the entry
+    // point uploads displayImage()), so it is the normal view; "View original"
+    // and the top "Original" checkbox swap in the base. Outside Studio the usual
+    // result / base fallback applies.
     const bool have_base = app && app->base.valid();
     const bool show_original = state->original || state->result_tex == 0;
-    const uint64_t tex = show_original ? state->base_tex : state->result_tex;
+    uint64_t tex;
+    if (studio) {
+        tex = (state->original || (app && app->studio_view_original)) ? state->base_tex
+                                                                      : state->result_tex;
+    } else {
+        tex = show_original ? state->base_tex : state->result_tex;
+    }
+
     if (tex != 0 && have_base) {
         const float ref_w = static_cast<float>(app->base.width);
         const float ref_h = static_cast<float>(app->base.height);
@@ -712,8 +888,34 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         ui_image(a, ctx, dst, tex, Color{0xff, 0xff, 0xff, 0xff});
         ui_rect_border(a, ctx, dst, t.border, 4.0f, 1.0f);
 
-        // Face overlay + click-to-toggle. Faces are stored in base pixels.
-        if (state->overlay && !show_original && app) {
+        // Studio red mask overlay (straight alpha, uploaded base-resolution).
+        // It covers the same base area as the image, so it aligns with `dst`.
+        if (studio && app && app->studio_show_mask && state->mask_tex != 0 &&
+            state->mask_tex_w > 0 && state->mask_tex_h > 0) {
+            ui_image(a, ctx, dst, state->mask_tex, Color{0xff, 0xff, 0xff, 0xff});
+        }
+
+        // Brush cursor in Studio mode.
+        if (studio) {
+            const bool mouse_in = ctx->mouse_x >= dst.x && ctx->mouse_x <= dst.x + dst.w &&
+                                  ctx->mouse_y >= dst.y && ctx->mouse_y <= dst.y + dst.h;
+            if (mouse_in) {
+                const float brush = app ? app->studio_size : 60.0f;
+                const float half = brush * scale * 0.5f;
+                const float bx = ctx->mouse_x - dst.x;
+                const float by = ctx->mouse_y - dst.y;
+                const float cursor_x = dst.x + bx + half;
+                const float cursor_y = dst.y + by + half;
+                ui_dashed_rect(a, ctx,
+                               Rect{cursor_x - half, cursor_y - half, brush * scale, brush * scale},
+                               app && app->studio_erase ? t.accent : t.on_accent, 2.0f, 1.0f);
+                ui_text(a, ctx, cursor_x + half + 4.0f, cursor_y,
+                        arena_fmt(a, "%.0f", brush), t.text, 12.0f);
+            }
+        }
+
+        // Face overlay + click-to-toggle (disabled in Studio).
+        if (!studio && state->overlay && !show_original && app) {
             app::FacesSnapshot snap = app->facesSnapshot();
             for (int i = 0; i < snap.count; ++i) {
                 const float bx = dst.x + snap.faces[i].bbox[0] * scale;

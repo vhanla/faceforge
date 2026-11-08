@@ -11,6 +11,7 @@
 // ids that the entry point fills from `app`/`video` each frame:
 //   base_tex    pristine input image (the "Original" view)
 //   result_tex  composed/retouched output (the normal view)
+//   mask_tex    Studio retouch mask preview (red overlay; base resolution)
 //   face_tex[]  per-face thumbnails
 //   identity_tex[] identity thumbnails
 //   vid_cur_tex / vid_res_tex / vid_face_tex[]  video frame, processed frame
@@ -32,6 +33,9 @@ struct UIState {
     app::App* app = nullptr;
 
     bool light_theme = false;
+    // Acrylic background: translucent surfaces over a compositor-blurred
+    // desktop (set by the entry point from the window/platform options).
+    bool acrylic = false;
     AppMode mode = AppMode::Photo;
 
     // Navigation rail:
@@ -84,6 +88,14 @@ struct UIState {
     uint64_t result_tex = 0;
     int result_tex_w = 0;
     int result_tex_h = 0;
+
+    // Studio retouch mask overlay (straight-alpha RGBA, base resolution), owned by
+    // the entry point. `mask_gen` from app::App drives uploads so the preview stays
+    // in sync with the mask on the UI thread.
+    uint64_t mask_tex = 0;
+    int mask_tex_w = 0;
+    int mask_tex_h = 0;
+    uint32_t mask_gen_seen = 0;
     uint64_t face_tex[app::kMaxFaces] = {};
     uint64_t identity_tex[app::kMaxIdentities] = {};
     uint32_t identity_gen_seen = 0;

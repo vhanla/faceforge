@@ -23,6 +23,8 @@ public:
 
     uint64_t create_texture_bgr(const uint8_t* bgr, int w, int h,
                                 int stride) override;
+    uint64_t create_texture_rgba(const uint8_t* rgba, int w, int h,
+                                 int stride) override;
     void destroy_texture(uint64_t id) override;
     void draw_texture(uint64_t id, Rect dst, Rect uv, Color tint) override;
 
@@ -35,6 +37,9 @@ public:
 private:
     struct Impl;
     Impl* impl_ = nullptr;
+
+    uint64_t create_texture_impl(const uint8_t* pixels, int w, int h, int stride,
+                                 unsigned int format);
 
     void draw_text_impl(const char* text, float x, float y, float size, Color c0,
                         Color c1, uint8_t weight);

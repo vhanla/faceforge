@@ -175,6 +175,24 @@ struct App {
     int32_t result_level = -1;
     bool result_dirty = false;
 
+    // ---- Studio retouch mask (UI thread only) ----
+    // The mask is base-resolution and holds the "paint the original back"
+    // amount; display is the result with that mask blended in, used by the
+    // canvas and by save/copy/apply.
+    bool studio = false;
+    bool studio_erase = true;
+    float studio_size = 60.0f;
+    float studio_hard = 0.6f;
+    float studio_opac = 0.9f;
+    bool studio_show_mask = true;
+    bool studio_view_original = false;
+    bool mask_used = false;
+    uint32_t mask_gen = 0;
+    int mask_undo_len = 0;
+    int mask_redo_len = 0;
+    ff::Image display;
+    bool display_dirty = false;
+
     // ---- working image ----
     ff::Image proc; // owned (preview) or a borrowed view of base
     int32_t proc_w = 0;
@@ -236,6 +254,30 @@ struct App {
 
     void undoHistory();
     void redoHistory();
+
+    // ---- Studio retouch (call from the UI thread) ----
+    // Ensures the mask matches the current base image. Returns false when the
+    // base is missing or allocation fails.
+    bool studioEnsureMask();
+    // Drops the mask, undo/redo and the blended display image. Called whenever
+    // the base changes so stale retouches cannot leak into another picture.
+    void clearStudio();
+    // Clears the paint but keeps the mask allocated.
+    void studioReset();
+    void studioBegin(float px, float py);
+    void studioTo(float px, float py);
+    void studioEnd();
+    void maskUndo();
+    void maskRedo();
+    // The image the user sees and exports: result with the mask blended in,
+    // or the raw result when nothing is painted. Rebuilds on demand.
+    const ff::Image* displayImage();
+    // Reduced straight-alpha RGBA preview of the mask (max 900 px long side),
+    // or nullptr when no retouch is active. Valid until the next mask change.
+    const uint8_t* maskPreviewData(int* out_w, int* out_h);
+    // Marks the blended display view stale so the next displayImage() rebuilds
+    // it. Call after Studio settings change.
+    void invalidateView();
 
     // Advances the worker from the UI thread; call once per frame.
     void poll();
@@ -320,6 +362,48 @@ private:
     void freeProc();
     void pushUndo(ff::Image&& img);
     void clearRedo();
+
+    // Studio retouch internals (UI thread only).
+    struct MaskEdit {
+        int32_t x = 0;
+        int32_t y = 0;
+        int32_t w = 0;
+        int32_t h = 0;
+        std::vector<uint8_t> data;
+    };
+    void updateDisplay();
+    const ff::Image* originalFor(int32_t w, int32_t h);
+    void maskStampAt(float cx, float cy, bool erase);
+    std::vector<uint8_t> copyMaskRegionVec(const std::vector<uint8_t>& src, int32_t stride,
+                                          int32_t x, int32_t y, int32_t w, int32_t h) const;
+    void writeMaskRegion(const MaskEdit& edit);
+    void pushMaskUndo(MaskEdit&& edit);
+    void pushMaskRedo(MaskEdit&& edit);
+    void clearMaskRedo();
+
+    std::vector<uint8_t> mask_;
+    int32_t mask_w_ = 0;
+    int32_t mask_h_ = 0;
+    std::vector<MaskEdit> mask_undo_;
+    std::vector<MaskEdit> mask_redo_;
+    std::vector<uint8_t> stroke_before_;
+    bool stroke_active_ = false;
+    int32_t stroke_min_x_ = 0;
+    int32_t stroke_min_y_ = 0;
+    int32_t stroke_max_x_ = -1;
+    int32_t stroke_max_y_ = -1;
+    float stroke_last_x_ = 0.0f;
+    float stroke_last_y_ = 0.0f;
+    uint64_t view_gen_ = 1;
+    uint64_t display_gen_ = 0;
+    ff::Image orig_cache_;
+    int32_t orig_cache_w_ = 0;
+    int32_t orig_cache_h_ = 0;
+    uint64_t orig_cache_gen_ = ~0ull;
+    std::vector<uint8_t> mask_preview_;
+    int32_t mask_preview_w_ = 0;
+    int32_t mask_preview_h_ = 0;
+    uint32_t mask_preview_gen_ = ~0u;
 
     bool needsFullRes() const;
     void beginFullResExport(ExportKind kind, const std::string& path);

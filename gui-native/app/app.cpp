@@ -320,7 +320,8 @@ void App::applyResultAsInput() {
         beginFullResExport(ExportKind::ApplyInput, "");
         return;
     }
-    if (!result.valid()) {
+    const ff::Image* shown = displayImage();
+    if (!shown || !shown->valid()) {
         setStatus("Process an image first", true);
         return;
     }
@@ -329,7 +330,7 @@ void App::applyResultAsInput() {
         if (snap.valid()) pushUndo(std::move(snap));
     }
     clearRedo();
-    ff::Image next = result.clone();
+    ff::Image next = shown->clone();
     if (!next.valid()) {
         setStatus("Out of memory", true);
         return;
@@ -338,6 +339,7 @@ void App::applyResultAsInput() {
     base_dirty = true;
     base_gen++;
     clearResult();
+    clearStudio();
     clearPatches();
     freeProc();
     face_count = 0;
@@ -351,6 +353,7 @@ void App::clearTarget() {
     base_gen++;
     base_dirty = true;
     clearResult();
+    clearStudio();
     clearPatches();
     freeProc();
     face_count = 0;
@@ -378,6 +381,7 @@ void App::undoHistory() {
     base_dirty = true;
     base_gen++;
     clearResult();
+    clearStudio();
     clearPatches();
     freeProc();
     face_count = 0;
@@ -403,11 +407,357 @@ void App::redoHistory() {
     base_dirty = true;
     base_gen++;
     clearResult();
+    clearStudio();
     clearPatches();
     freeProc();
     face_count = 0;
     spawnJob(JobKind::ReloadTarget, -1);
     setStatus("Redo", false);
+}
+
+// ---- Studio retouch --------------------------------------------------------
+
+void App::invalidateView() {
+    view_gen_ += 1;
+    result_dirty = true;
+}
+
+void App::clearStudio() {
+    stroke_active_ = false;
+    stroke_before_.clear();
+    mask_.clear();
+    mask_w_ = 0;
+    mask_h_ = 0;
+    mask_used = false;
+    mask_undo_.clear();
+    mask_redo_.clear();
+    mask_undo_len = 0;
+    mask_redo_len = 0;
+    display.reset();
+    orig_cache_.reset();
+    orig_cache_w_ = 0;
+    orig_cache_h_ = 0;
+    orig_cache_gen_ = ~0ull;
+    mask_preview_.clear();
+    mask_preview_w_ = 0;
+    mask_preview_h_ = 0;
+    mask_preview_gen_ = ~0u;
+    mask_gen += 1;
+    invalidateView();
+}
+
+bool App::studioEnsureMask() {
+    if (!base.valid() || base.width <= 0 || base.height <= 0) return false;
+    if (!mask_.empty() && mask_w_ == base.width && mask_h_ == base.height) return true;
+
+    mask_.clear();
+    mask_w_ = 0;
+    mask_h_ = 0;
+    mask_undo_.clear();
+    mask_redo_.clear();
+    mask_undo_len = 0;
+    mask_redo_len = 0;
+    display.reset();
+    mask_preview_.clear();
+    mask_preview_w_ = 0;
+    mask_preview_h_ = 0;
+    mask_preview_gen_ = ~0u;
+
+    try {
+        mask_.assign(static_cast<size_t>(base.width) * static_cast<size_t>(base.height), 0);
+    } catch (...) {
+        return false;
+    }
+    mask_w_ = base.width;
+    mask_h_ = base.height;
+    mask_used = false;
+    mask_gen += 1;
+    invalidateView();
+    return true;
+}
+
+void App::studioReset() {
+    if (!mask_.empty()) std::fill(mask_.begin(), mask_.end(), 0);
+    mask_used = false;
+    mask_undo_.clear();
+    mask_redo_.clear();
+    mask_undo_len = 0;
+    mask_redo_len = 0;
+    mask_gen += 1;
+    invalidateView();
+    mask_preview_gen_ = ~0u;
+    setStatus("Retouch cleared", false);
+}
+
+void App::maskStampAt(float cx, float cy, bool erase) {
+    const int32_t mw = mask_w_;
+    const int32_t mh = mask_h_;
+    if (mw <= 0 || mh <= 0 || mask_.empty()) return;
+
+    const float radius = std::max(0.6f, studio_size * 0.5f);
+    const float hard = std::clamp(studio_hard, 0.0f, 0.98f);
+    const float opac = std::clamp(studio_opac, 0.01f, 1.0f);
+    const float inner = radius * hard;
+    const float falloff = 1.0f / std::max(0.0001f, radius - inner);
+
+    const int32_t x0 = std::max(0, static_cast<int32_t>(std::floor(cx - radius)));
+    const int32_t y0 = std::max(0, static_cast<int32_t>(std::floor(cy - radius)));
+    const int32_t x1 = std::min(mw - 1, static_cast<int32_t>(std::floor(cx + radius)));
+    const int32_t y1 = std::min(mh - 1, static_cast<int32_t>(std::floor(cy + radius)));
+    if (x1 < x0 || y1 < y0) return;
+
+    const size_t mwu = static_cast<size_t>(mw);
+    for (int32_t yy = y0; yy <= y1; ++yy) {
+        uint8_t* row = mask_.data() + static_cast<size_t>(yy) * mwu;
+        const float dy = static_cast<float>(yy) + 0.5f - cy;
+        for (int32_t xx = x0; xx <= x1; ++xx) {
+            const float dx = static_cast<float>(xx) + 0.5f - cx;
+            const float d = std::sqrt(dx * dx + dy * dy);
+            float t = 1.0f;
+            if (d > inner) t = 1.0f - (d - inner) * falloff;
+            if (t <= 0.0f) continue;
+            const float a = opac * t;
+            const float cur = static_cast<float>(row[xx]);
+            const float nv = erase ? cur + (255.0f - cur) * a : cur * (1.0f - a);
+            row[xx] = static_cast<uint8_t>(std::clamp(nv, 0.0f, 255.0f));
+        }
+    }
+
+    stroke_min_x_ = std::min(stroke_min_x_, x0);
+    stroke_min_y_ = std::min(stroke_min_y_, y0);
+    stroke_max_x_ = std::max(stroke_max_x_, x1);
+    stroke_max_y_ = std::max(stroke_max_y_, y1);
+}
+
+void App::studioBegin(float px, float py) {
+    if (!studioEnsureMask() || mask_.empty()) return;
+    stroke_before_ = mask_;
+    stroke_active_ = true;
+    stroke_min_x_ = mask_w_;
+    stroke_min_y_ = mask_h_;
+    stroke_max_x_ = -1;
+    stroke_max_y_ = -1;
+    stroke_last_x_ = px;
+    stroke_last_y_ = py;
+
+    maskStampAt(px, py, studio_erase);
+    mask_used = true;
+    mask_gen += 1;
+    invalidateView();
+}
+
+void App::studioTo(float px, float py) {
+    if (!stroke_active_) return;
+    const float spacing = std::max(1.0f, studio_size * 0.18f);
+    const float dx = px - stroke_last_x_;
+    const float dy = py - stroke_last_y_;
+    const float dist = std::sqrt(dx * dx + dy * dy);
+    const int steps = static_cast<int>(std::max(1.0f, std::ceil(dist / spacing)));
+    for (int k = 1; k <= steps; ++k) {
+        const float t = static_cast<float>(k) / static_cast<float>(steps);
+        maskStampAt(stroke_last_x_ + dx * t, stroke_last_y_ + dy * t, studio_erase);
+    }
+    stroke_last_x_ = px;
+    stroke_last_y_ = py;
+    mask_gen += 1;
+    invalidateView();
+}
+
+void App::studioEnd() {
+    if (!stroke_active_) return;
+    stroke_active_ = false;
+    if (stroke_max_x_ < stroke_min_x_ || stroke_max_y_ < stroke_min_y_ ||
+        stroke_before_.size() != mask_.size()) {
+        stroke_before_.clear();
+        return;
+    }
+    const int32_t x = stroke_min_x_;
+    const int32_t y = stroke_min_y_;
+    const int32_t w = stroke_max_x_ - x + 1;
+    const int32_t h = stroke_max_y_ - y + 1;
+    MaskEdit edit;
+    edit.x = x;
+    edit.y = y;
+    edit.w = w;
+    edit.h = h;
+    edit.data = copyMaskRegionVec(stroke_before_, mask_w_, x, y, w, h);
+    if (!edit.data.empty()) pushMaskUndo(std::move(edit));
+    stroke_before_.clear();
+    setStatus("Retouched - " + std::to_string(mask_undo_len) + " stroke(s)", false);
+}
+
+std::vector<uint8_t> App::copyMaskRegionVec(const std::vector<uint8_t>& src, int32_t stride,
+                                            int32_t x, int32_t y, int32_t w, int32_t h) const {
+    std::vector<uint8_t> out;
+    if (stride <= 0 || w <= 0 || h <= 0) return out;
+    out.resize(static_cast<size_t>(w) * static_cast<size_t>(h));
+    for (int32_t row = 0; row < h; ++row) {
+        const size_t off = static_cast<size_t>(y + row) * static_cast<size_t>(stride) +
+                           static_cast<size_t>(x);
+        if (off + static_cast<size_t>(w) > src.size()) {
+            out.clear();
+            return out;
+        }
+        std::memcpy(out.data() + static_cast<size_t>(row) * static_cast<size_t>(w),
+                    src.data() + off, static_cast<size_t>(w));
+    }
+    return out;
+}
+
+void App::writeMaskRegion(const MaskEdit& edit) {
+    if (mask_w_ <= 0 || edit.w <= 0 || edit.h <= 0) return;
+    for (int32_t row = 0; row < edit.h; ++row) {
+        const size_t off = static_cast<size_t>(edit.y + row) * static_cast<size_t>(mask_w_) +
+                           static_cast<size_t>(edit.x);
+        if (off + static_cast<size_t>(edit.w) > mask_.size()) return;
+        std::memcpy(mask_.data() + off,
+                    edit.data.data() + static_cast<size_t>(row) * static_cast<size_t>(edit.w),
+                    static_cast<size_t>(edit.w));
+    }
+}
+
+void App::pushMaskUndo(MaskEdit&& edit) {
+    constexpr size_t kCap = 32;
+    if (mask_undo_.size() >= kCap) mask_undo_.erase(mask_undo_.begin());
+    mask_undo_.push_back(std::move(edit));
+    mask_undo_len = static_cast<int>(mask_undo_.size());
+    clearMaskRedo();
+}
+
+void App::pushMaskRedo(MaskEdit&& edit) {
+    constexpr size_t kCap = 32;
+    if (mask_redo_.size() >= kCap) mask_redo_.erase(mask_redo_.begin());
+    mask_redo_.push_back(std::move(edit));
+    mask_redo_len = static_cast<int>(mask_redo_.size());
+}
+
+void App::clearMaskRedo() {
+    mask_redo_.clear();
+    mask_redo_len = 0;
+}
+
+void App::maskUndo() {
+    if (mask_undo_.empty()) {
+        setStatus("Nothing to undo", true);
+        return;
+    }
+    MaskEdit edit = std::move(mask_undo_.back());
+    mask_undo_.pop_back();
+    mask_undo_len = static_cast<int>(mask_undo_.size());
+
+    std::vector<uint8_t> after = copyMaskRegionVec(mask_, mask_w_, edit.x, edit.y, edit.w,
+                                                   edit.h);
+    if (!after.empty()) {
+        MaskEdit redo = edit;
+        redo.data = std::move(after);
+        pushMaskRedo(std::move(redo));
+    }
+    writeMaskRegion(edit);
+    mask_used = true;
+    mask_gen += 1;
+    invalidateView();
+    setStatus("Retouch undo", false);
+}
+
+void App::maskRedo() {
+    if (mask_redo_.empty()) {
+        setStatus("Nothing to redo", true);
+        return;
+    }
+    MaskEdit edit = std::move(mask_redo_.back());
+    mask_redo_.pop_back();
+    mask_redo_len = static_cast<int>(mask_redo_.size());
+
+    std::vector<uint8_t> before = copyMaskRegionVec(mask_, mask_w_, edit.x, edit.y, edit.w,
+                                                    edit.h);
+    if (!before.empty()) {
+        MaskEdit undo = edit;
+        undo.data = std::move(before);
+        if (mask_undo_.size() >= 32) mask_undo_.erase(mask_undo_.begin());
+        mask_undo_.push_back(std::move(undo));
+        mask_undo_len = static_cast<int>(mask_undo_.size());
+    }
+    writeMaskRegion(edit);
+    mask_used = true;
+    mask_gen += 1;
+    invalidateView();
+    setStatus("Retouch redo", false);
+}
+
+void App::updateDisplay() {
+    if (display_gen_ == view_gen_) return;
+    display_gen_ = view_gen_;
+    display.reset();
+    if (!mask_used || mask_.empty() || !result.valid()) return;
+    const ff::Image* orig = originalFor(result.width, result.height);
+    if (!orig || !orig->valid()) return;
+    ff::Image disp = result.clone();
+    if (!disp.valid()) return;
+    if (!ff::blendMask(disp, *orig, mask_.data(), mask_w_, mask_h_)) return;
+    display = std::move(disp);
+}
+
+const ff::Image* App::originalFor(int32_t w, int32_t h) {
+    if (w <= 0 || h <= 0) return nullptr;
+    if (proc_w == w && proc_h == h && proc.valid() && proc.width == w && proc.height == h) {
+        return &proc;
+    }
+    if (orig_cache_.valid() && orig_cache_w_ == w && orig_cache_h_ == h &&
+        orig_cache_gen_ == base_gen) {
+        return &orig_cache_;
+    }
+    if (!base.valid()) return nullptr;
+    orig_cache_.reset();
+    orig_cache_ = base.resized(w, h);
+    orig_cache_w_ = w;
+    orig_cache_h_ = h;
+    orig_cache_gen_ = base_gen;
+    return orig_cache_.valid() ? &orig_cache_ : nullptr;
+}
+
+const ff::Image* App::displayImage() {
+    updateDisplay();
+    if (display.valid()) return &display;
+    if (result.valid()) return &result;
+    return nullptr;
+}
+
+const uint8_t* App::maskPreviewData(int* out_w, int* out_h) {
+    if (out_w) *out_w = 0;
+    if (out_h) *out_h = 0;
+    if (!mask_used || mask_.empty() || mask_w_ <= 0 || mask_h_ <= 0) return nullptr;
+    if (mask_preview_gen_ != mask_gen || mask_preview_.empty()) {
+        mask_preview_gen_ = mask_gen;
+        const int32_t mw = mask_w_;
+        const int32_t mh = mask_h_;
+        const float longest = static_cast<float>(std::max(mw, mh));
+        const float f = longest > 900.0f ? 900.0f / longest : 1.0f;
+        const int32_t ow = std::max(1, static_cast<int32_t>(static_cast<float>(mw) * f));
+        const int32_t oh = std::max(1, static_cast<int32_t>(static_cast<float>(mh) * f));
+        mask_preview_.assign(static_cast<size_t>(ow) * static_cast<size_t>(oh) * 4u, 0);
+        const float fx = static_cast<float>(mw) / static_cast<float>(ow);
+        const float fy = static_cast<float>(mh) / static_cast<float>(oh);
+        for (int32_t y = 0; y < oh; ++y) {
+            const int32_t my = std::min(mh - 1, static_cast<int32_t>((static_cast<float>(y) + 0.5f) * fy));
+            const uint8_t* row = mask_.data() + static_cast<size_t>(my) * static_cast<size_t>(mw);
+            for (int32_t x = 0; x < ow; ++x) {
+                const int32_t mx = std::min(mw - 1, static_cast<int32_t>((static_cast<float>(x) + 0.5f) * fx));
+                const float a = static_cast<float>(row[mx]) * (0.42f);
+                uint8_t* px = mask_preview_.data() +
+                              (static_cast<size_t>(y) * static_cast<size_t>(ow) +
+                               static_cast<size_t>(x)) * 4u;
+                px[0] = 255;
+                px[1] = 70;
+                px[2] = 58;
+                px[3] = static_cast<uint8_t>(std::clamp(a, 0.0f, 255.0f));
+            }
+        }
+        mask_preview_w_ = ow;
+        mask_preview_h_ = oh;
+    }
+    if (out_w) *out_w = mask_preview_w_;
+    if (out_h) *out_h = mask_preview_h_;
+    return mask_preview_.empty() ? nullptr : mask_preview_.data();
 }
 
 // ---- helpers ---------------------------------------------------------------
@@ -472,11 +822,12 @@ void App::finishExport() {
 }
 
 void App::saveResultNow(const std::string& path) {
-    if (!result.valid()) {
+    const ff::Image* shown = displayImage();
+    if (!shown || !shown->valid()) {
         setStatus("Nothing to save", true);
         return;
     }
-    if (result.save(path.c_str())) {
+    if (shown->save(path.c_str())) {
         save_path = path;
         setStatus("Saved - " + path, false);
     } else {
@@ -485,12 +836,13 @@ void App::saveResultNow(const std::string& path) {
 }
 
 void App::copyNow() {
-    if (!result.valid()) {
+    const ff::Image* shown = displayImage();
+    if (!shown || !shown->valid()) {
         setStatus("Nothing to copy", true);
         return;
     }
     clipboard_png.clear();
-    if (result.encodePng(clipboard_png)) {
+    if (shown->encodePng(clipboard_png)) {
         setStatus("Copied to clipboard", false);
     } else {
         clipboard_png.clear();
@@ -1054,6 +1406,8 @@ void App::takePendingResult() {
     result = ff::Image::fromOwned(buf, pending_w_, pending_h_);
     pending_result_.clear();
     result_dirty = true;
+    view_gen_ += 1;
+    updateDisplay();
 }
 
 void App::buildFaceThumbs() {
@@ -1077,6 +1431,11 @@ void App::buildFaceThumbs() {
 
 void App::clearResult() {
     result.reset();
+    display.reset();
+    view_gen_ += 1;
+    // Nothing to blend while there is no result; mark as built so the next
+    // frame does not rebuild for no reason.
+    display_gen_ = view_gen_;
     result_sig = 0;
     result_level = -1;
     result_dirty = true;

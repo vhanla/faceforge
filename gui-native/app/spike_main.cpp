@@ -55,6 +55,8 @@ struct Options {
     bool update_explicit = false;
     int frames = 3;
     bool light = false;
+    bool acrylic = false;
+    bool acrylic_set = false;
     bool video = false;
     std::string video_path;
     bool wait_idle = false;
@@ -78,6 +80,9 @@ void print_usage(const char* argv0) {
         "  --save PATH         save path used by the Output field\n"
         "  --video [PATH]      start in the video workspace, optionally opening PATH\n"
         "  --light             start with the light theme\n"
+        "  --acrylic           translucent surfaces over a blurred desktop (default\n"
+        "                      when the platform supports it)\n"
+        "  --no-acrylic        keep the window opaque\n"
         "  --screenshot OUT    render a few frames, write a PPM and exit\n"
         "  --frames N          frames to render before the screenshot (default 3)\n"
         "  --wait              screenshot only once the pipeline goes idle\n"
@@ -144,6 +149,12 @@ Options parse_args(int argc, char** argv) {
             }
         } else if (std::strcmp(a, "--light") == 0) {
             o.light = true;
+        } else if (std::strcmp(a, "--acrylic") == 0) {
+            o.acrylic = true;
+            o.acrylic_set = true;
+        } else if (std::strcmp(a, "--no-acrylic") == 0) {
+            o.acrylic = false;
+            o.acrylic_set = true;
         } else if (std::strcmp(a, "--video") == 0) {
             o.video = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') o.video_path = argv[++i];
@@ -238,8 +249,25 @@ void sync_textures(OpenGL3Backend& backend, app::App& app, UIState& st) {
     }
     if (app.result_dirty) {
         app.result_dirty = false;
+        // In Studio mode the canvas shows the result with the retouch mask
+        // blended in, so upload the display image instead of the raw result.
+        const ff::Image* shown = app.studio ? app.displayImage() : &app.result;
         upload_image(backend, st.result_tex, st.result_tex_w, st.result_tex_h,
-                     app.result.valid() ? &app.result : nullptr);
+                     shown && shown->valid() ? shown : nullptr);
+    }
+
+    // Studio retouch mask: straight-alpha RGBA at base resolution, driven by
+    // App::mask_gen so it stays in sync with UI-thread mask edits.
+    if (app.studio && app.studio_show_mask && app.mask_gen != st.mask_gen_seen) {
+        st.mask_gen_seen = app.mask_gen;
+        int pw = 0, ph = 0;
+        const uint8_t* rgba = app.maskPreviewData(&pw, &ph);
+        if (rgba && pw > 0 && ph > 0) {
+            if (st.mask_tex) backend.destroy_texture(st.mask_tex);
+            st.mask_tex = backend.create_texture_rgba(rgba, pw, ph, 4 * pw);
+            st.mask_tex_w = pw;
+            st.mask_tex_h = ph;
+        }
     }
 
     // Face thumbnails are rebuilt by App::poll() on this thread, so reading the
@@ -298,6 +326,7 @@ void sync_video_textures(OpenGL3Backend& backend, app::Video& video, UIState& st
 void destroy_textures(OpenGL3Backend& backend, UIState& st) {
     if (st.base_tex) backend.destroy_texture(st.base_tex);
     if (st.result_tex) backend.destroy_texture(st.result_tex);
+    if (st.mask_tex) backend.destroy_texture(st.mask_tex);
     if (st.vid_cur_tex) backend.destroy_texture(st.vid_cur_tex);
     if (st.vid_res_tex) backend.destroy_texture(st.vid_res_tex);
     for (int i = 0; i < app::kVideoMaxFaces; ++i) {
@@ -356,19 +385,27 @@ int dispatch_commands(OpenGL3Backend& backend, UIContext& ui) {
 
 int main(int argc, char** argv) {
     const Options options = parse_args(argc, argv);
+    // Acrylic is opt-out: enable it on desktops whose compositor can blur
+    // behind the window.
+    const bool acrylic = options.acrylic_set ? options.acrylic : platform::acrylic_available();
 
     platform::WindowDesc desc;
     desc.width = options.width;
     desc.height = options.height;
     desc.title = "FaceForge";
     desc.undecorated = true;
-    desc.transparent = false;
+    desc.transparent = acrylic;
+    desc.acrylic = acrylic;
     desc.resizable = true;
     desc.visible = true;
     desc.center = true;
 
     platform::Window* window = platform::create(desc);
     if (!window) return 1;
+
+    // If the window did not get an alpha-capable framebuffer, drawing the
+    // translucent theme would just darken the UI against black.
+    const bool acrylic_on = acrylic && platform::framebuffer_transparent(window);
 
     std::printf("platform: %s\n", platform::platform_name());
 
@@ -401,6 +438,7 @@ int main(int argc, char** argv) {
     state->app = app;
     state->video = video;
     state->light_theme = options.light;
+    state->acrylic = acrylic_on;
     state->mode = options.video ? AppMode::Video : AppMode::Photo;
     std::snprintf(state->models_dir, sizeof(state->models_dir), "%s", app->model_dir.c_str());
 
@@ -439,6 +477,27 @@ int main(int argc, char** argv) {
         state->sync_output_path = true;
     }
     for (const std::string& p : identities) app->addIdentityFile(p);
+
+    // Scripted Studio entry point: open the retouch workspace with a mask ready
+    // so screenshots can exercise the panel and canvas overlay. An optional
+    // stroke paints across the middle so the red overlay is visible.
+    if (std::getenv("FACEFORGE_STUDIO")) {
+        app->studio = true;
+        app->studioEnsureMask();
+        if (std::getenv("FACEFORGE_STUDIO_PAINT") && app->base.valid()) {
+            const float w = static_cast<float>(app->base.width);
+            const float h = static_cast<float>(app->base.height);
+            app->studio_erase = true;
+            app->studio_size = std::max(24.0f, w * 0.08f);
+            app->studio_hard = 0.7f;
+            app->studio_opac = 0.9f;
+            app->studioBegin(w * 0.35f, h * 0.5f);
+            for (int i = 1; i <= 12; ++i) {
+                app->studioTo(w * (0.35f + 0.03f * static_cast<float>(i)), h * 0.5f);
+            }
+            app->studioEnd();
+        }
+    }
 
     // Video mode: the autotest owns opening (+ analysis/export/playback), a
     // path from the CLI or FACEFORGE_VIDEO opens the workspace directly.
@@ -610,7 +669,9 @@ int main(int argc, char** argv) {
         ui.mouse_right_clicked = mouse_right_clicked;
         ui.mouse_right_released = mouse_right_released;
 
-        ui.theme = state->light_theme ? &theme_light() : &theme_faceforge();
+        ui.theme = state->acrylic
+                       ? (state->light_theme ? &acrylic_light_theme() : &acrylic_dark_theme())
+                       : (state->light_theme ? &theme_light() : &theme_faceforge());
         ui.time_seconds = static_cast<float>(now);
         ui.dt = dt;
         ui.scroll_delta = static_cast<float>(scroll);

@@ -1,11 +1,17 @@
 #include "platform/window.hpp"
 
-#include <GLFW/glfw3.h>
-
 #if defined(_WIN32)
 #include <windows.h>
 #include <commdlg.h>
+#include <dwmapi.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
+#elif defined(__linux__) && defined(AMUIE_HAVE_X11)
+#define GLFW_EXPOSE_NATIVE_X11
+#include <X11/Xatom.h>
 #endif
+
+#include <GLFW/glfw3.h>
+#include <GLFW/glfw3native.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -82,6 +88,62 @@ int to_glfw_key(Key key) {
     return GLFW_KEY_UNKNOWN;
 }
 
+// Backdrop blur, best effort. The window still has to be created with an ARGB
+// framebuffer (desc.transparent) and the app has to draw translucent surfaces
+// for the blur to be visible.
+void activate_acrylic(GLFWwindow* handle) {
+#if defined(_WIN32)
+    HWND hwnd = glfwGetWin32Window(handle);
+    if (!hwnd) return;
+    // Windows 11 22H2+: system backdrop type 4 = acrylic.
+    int backdrop = 4; // DWMSBT_ACRYLIC
+    if (SUCCEEDED(DwmSetWindowAttribute(hwnd, 38 /* DWMWA_SYSTEMBACKDROP_TYPE */,
+                                        &backdrop, sizeof(backdrop)))) {
+        return;
+    }
+    // Windows 10 fallback: the undocumented accent policy (acrylic blur behind).
+    struct AccentPolicy {
+        int state;
+        int flags;
+        int gradient_color;
+        int animation_id;
+    };
+    struct WindowCompositionAttribData {
+        int attribute;
+        void* data;
+        size_t size;
+    };
+    using SetWindowCompositionAttributeFn =
+        BOOL(WINAPI*)(HWND, WindowCompositionAttribData*);
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (!user32) return;
+    auto set_attr = reinterpret_cast<SetWindowCompositionAttributeFn>(
+        GetProcAddress(user32, "SetWindowCompositionAttribute"));
+    if (!set_attr) return;
+    AccentPolicy policy{};
+    policy.state = 4; // ACCENT_ENABLE_ACRYLICBLURBEHIND
+    policy.flags = 2; // draw the gradient over the blurred region
+    policy.gradient_color = 0x991C1715; // AABBGGRR (theme bg_app)
+    WindowCompositionAttribData data{19 /* WCA_ACCENT_POLICY */, &policy, sizeof(policy)};
+    set_attr(hwnd, &data);
+#elif defined(__linux__) && defined(AMUIE_HAVE_X11)
+    // KWin (Plasma) blurs the desktop behind X11 windows that carry the
+    // _KDE_NET_WM_BLUR_BEHIND_REGION hint. An empty region means the whole
+    // window. Other compositors have no portable equivalent.
+    Display* display = glfwGetX11Display();
+    const ::Window xid = glfwGetX11Window(handle);
+    if (!display || !xid) return;
+    const Atom atom = XInternAtom(display, "_KDE_NET_WM_BLUR_BEHIND_REGION", False);
+    if (atom == None) return;
+    // Zero rectangles: blur the whole window. The data pointer is unused.
+    const unsigned char empty = 0;
+    XChangeProperty(display, xid, atom, XA_CARDINAL, 32, PropModeReplace, &empty, 0);
+    XFlush(display);
+#else
+    (void)handle;
+#endif
+}
+
 } // namespace
 
 Window* create(const WindowDesc& desc) {
@@ -136,6 +198,8 @@ Window* create(const WindowDesc& desc) {
     glfwMakeContextCurrent(handle);
     glfwSwapInterval(1);
 
+    if (desc.acrylic) activate_acrylic(handle);
+
     Window* w = new Window();
     w->handle = handle;
     w->cursor_arrow = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
@@ -158,6 +222,28 @@ void destroy(Window* window) {
     }
     delete window;
     glfwTerminate();
+}
+
+bool acrylic_available() {
+#if defined(_WIN32)
+    // DWM acrylic (Win11) with the accent-policy fallback for Windows 10.
+    return true;
+#elif defined(__linux__) && defined(AMUIE_HAVE_X11)
+    // KWin needs an X11 window for _KDE_NET_WM_BLUR_BEHIND_REGION; there is no
+    // portable Wayland blur request.
+    if (!std::getenv("DISPLAY")) return false;
+    if (const char* desktop = std::getenv("XDG_CURRENT_DESKTOP")) {
+        if (std::strstr(desktop, "KDE") || std::strstr(desktop, "Plasma")) return true;
+    }
+    return std::getenv("KDE_FULL_SESSION") != nullptr;
+#else
+    return false;
+#endif
+}
+
+bool framebuffer_transparent(Window* window) {
+    if (!window || !window->handle) return false;
+    return glfwGetWindowAttrib(window->handle, GLFW_TRANSPARENT_FRAMEBUFFER) != 0;
 }
 
 void poll_events() { glfwPollEvents(); }

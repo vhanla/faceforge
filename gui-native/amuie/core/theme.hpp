@@ -127,3 +127,28 @@ inline constexpr Theme kThemeLight = {
 
 inline const Theme& theme_faceforge() { return kThemeFaceForge; }
 inline const Theme& theme_light()     { return kThemeLight; }
+
+// Acrylic/translucent variant: the window and its surfaces keep their hues but
+// drop most of their opacity so the compositor's blurred desktop shows through.
+// Text, icons and small controls stay (nearly) opaque to remain legible.
+inline Theme make_acrylic(Theme t) {
+    t.bg_window = Color{0x00, 0x00, 0x00, 0x00}; // clear: transparent black
+    t.bg_app.a = 0x9e;    // ~62% tint over the blur
+    t.bg_header.a = 0xb4;
+    t.bg_toolbar.a = 0xb4;
+    t.bg_panel.a = 0xb4;
+    t.bg_raised.a = 0xc8;
+    t.bg_control.a = 0xdc;
+    t.bg_control_hover.a = 0xe6;
+    return t;
+}
+
+inline const Theme& acrylic_dark_theme() {
+    static const Theme t = make_acrylic(kThemeFaceForge);
+    return t;
+}
+
+inline const Theme& acrylic_light_theme() {
+    static const Theme t = make_acrylic(kThemeLight);
+    return t;
+}

@@ -85,14 +85,37 @@ void main() {
         return;
     }
 
+    //if (v_mode > 0.5 && v_mode < 1.5) {
+        //// Text: 8-bit signed distance field (0.5 == glyph contour). The screen
+        //// derivative keeps the edge one device pixel wide at any output size, so
+        //// downscaled text stays crisp instead of turning blocky.
+        //float d = texture(u_atlas, v_uv).r;
+        //float w = max(fwidth(d) * 0.5, 1.0 / 4096.0);
+        //float a = smoothstep(0.5 - w, 0.5 + w, d);
+        //FragColor = vec4(v_fill.rgb, v_fill.a * a);
+        //return;
+    //}
     if (v_mode > 0.5 && v_mode < 1.5) {
-        // Text: 8-bit signed distance field (0.5 == glyph contour). The screen
-        // derivative keeps the edge one device pixel wide at any output size, so
-        // downscaled text stays crisp instead of turning blocky.
-        float d = texture(u_atlas, v_uv).r;
-        float w = max(fwidth(d) * 0.5, 1.0 / 4096.0);
-        float a = smoothstep(0.5 - w, 0.5 + w, d);
-        FragColor = vec4(v_fill.rgb, v_fill.a * a);
+        // Subpixel text: sample the coverage atlas at three horizontal offsets
+        // (one per LCD subpixel) and weight them per channel, which keeps glyph
+        // stems sharp on non-HiDPI screens. dFdx gives the UV advance of one
+        // device pixel; a third of that is one subpixel.
+        vec2 subpixel_offset = dFdx(v_uv) / 3.0;
+        // Clamp before pow(): pow() of a negative base is undefined in GLSL and
+        // would produce NaN / corrupt pixels on translucent backgrounds.
+        float r_alpha = max(texture(u_atlas, v_uv - subpixel_offset).r - 0.2, 0.0);
+        float g_alpha = max(texture(u_atlas, v_uv).r - 0.2, 0.0);
+        float b_alpha = max(texture(u_atlas, v_uv + subpixel_offset).r - 0.2, 0.0);
+
+        vec3 subpixel_alpha = vec3(r_alpha, g_alpha, b_alpha);
+        // Slight gamma correction keeps glyph weight even in dark themes.
+        subpixel_alpha = pow(subpixel_alpha, vec3(1.15));
+
+        // Average the channels back into the single alpha the standard blend
+        // needs; the per-channel structure only shapes the edges.
+        float final_alpha = (subpixel_alpha.r + subpixel_alpha.g + subpixel_alpha.b) / 3.0;
+
+        FragColor = vec4(v_fill.rgb, v_fill.a * final_alpha);
         return;
     }
 
@@ -208,6 +231,9 @@ struct OpenGL3Backend::Impl {
     int vx = 0, vy = 0, vw = 0, vh = 0;
     float scale_x = 1.0f;  // device px per logical px (horizontal)
     float scale_y = 1.0f;  // device px per logical px (vertical)
+    // Clear color outside the UI. The app overrides this per frame from the
+    // theme; acrylic themes use transparent black so the compositor shows the
+    // blurred desktop through the (premultiplied) surfaces drawn on top.
     Color clear_color{0x15, 0x17, 0x1c, 0xff};
 
     Vertex* vertices = nullptr;
@@ -333,7 +359,11 @@ void OpenGL3Backend::init() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // Straight-alpha color blending (the shader supplies straight RGB and
+    // coverage) while alpha accumulates as coverage. Over a transparent black
+    // clear this leaves premultiplied RGB in the framebuffer, which is what DWM
+    // and KWin expect from a transparent window.
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
 }
@@ -455,9 +485,9 @@ void OpenGL3Backend::draw_text_impl(const char* text, float x, float y, float si
     }
 }
 
-uint64_t OpenGL3Backend::create_texture_bgr(const uint8_t* bgr, int w, int h,
-                                            int stride) {
-    if (!impl_ || !bgr || w <= 0 || h <= 0) return 0;
+uint64_t OpenGL3Backend::create_texture_impl(const uint8_t* pixels, int w, int h,
+                                             int stride, unsigned int format) {
+    if (!impl_ || !pixels || w <= 0 || h <= 0) return 0;
     int slot = -1;
     for (int i = 0; i < Impl::kMaxTextures; ++i) {
         if (impl_->textures[i].id == 0) { slot = i; break; }
@@ -469,10 +499,13 @@ uint64_t OpenGL3Backend::create_texture_bgr(const uint8_t* bgr, int w, int h,
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, tex);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    // Native faceforge pixels are tightly packed BGR; GL_BGR avoids a swizzle.
+    // Native faceforge pixels are tightly packed; GL_BGR avoids a swizzle.
     glPixelStorei(GL_UNPACK_ROW_LENGTH, stride > 0 ? stride / 3 : w);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, w, h, 0, GL_BGR, GL_UNSIGNED_BYTE,
-                 bgr);
+    if (format == GL_RGBA) {
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, stride > 0 ? stride / 4 : w);
+    }
+    glTexImage2D(GL_TEXTURE_2D, 0, format == GL_RGBA ? GL_RGBA8 : GL_RGB8, w, h, 0,
+                 format, GL_UNSIGNED_BYTE, pixels);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -485,6 +518,16 @@ uint64_t OpenGL3Backend::create_texture_bgr(const uint8_t* bgr, int w, int h,
     impl_->textures[slot].w = w;
     impl_->textures[slot].h = h;
     return impl_->textures[slot].id;
+}
+
+uint64_t OpenGL3Backend::create_texture_bgr(const uint8_t* bgr, int w, int h,
+                                            int stride) {
+    return create_texture_impl(bgr, w, h, stride, GL_BGR);
+}
+
+uint64_t OpenGL3Backend::create_texture_rgba(const uint8_t* rgba, int w, int h,
+                                             int stride) {
+    return create_texture_impl(rgba, w, h, stride, GL_RGBA);
 }
 
 void OpenGL3Backend::destroy_texture(uint64_t id) {

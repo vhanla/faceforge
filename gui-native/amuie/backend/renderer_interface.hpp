@@ -48,6 +48,14 @@ public:
         (void)bgr; (void)w; (void)h; (void)stride;
         return 0;
     }
+    // Same registry for straight-alpha RGBA overlays (e.g. the red retouch mask
+    // preview). The fragment shader samples texture alpha, so a regular
+    // SRC_ALPHA blend shows it over the image underneath.
+    virtual uint64_t create_texture_rgba(const uint8_t* rgba, int w, int h,
+                                         int stride) {
+        (void)rgba; (void)w; (void)h; (void)stride;
+        return 0;
+    }
     virtual void destroy_texture(uint64_t id) { (void)id; }
     virtual void draw_texture(uint64_t id, Rect dst, Rect uv, Color tint) {
         (void)id; (void)uv;  // Backends without textures render a flat tint.

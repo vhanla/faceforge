@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(faceforge_native_ui CXX)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -26,11 +27,17 @@ target_include_directories(amuie PUBLIC "${AMUIE_DIR}")
 target_link_libraries(amuie PUBLIC glfw)
 
 if(WIN32)
-    target_link_libraries(amuie PUBLIC Opengl32)
+    target_link_libraries(amuie PUBLIC Opengl32 dwmapi)
 elseif(APPLE)
     target_link_libraries(amuie PUBLIC "-framework OpenGL")
 else()
     target_link_libraries(amuie PUBLIC GL)
+    # X11 is used for the KDE/KWin blur-behind hint (see platform/window.cpp).
+    find_package(X11 QUIET)
+    if(X11_FOUND)
+        target_link_libraries(amuie PUBLIC X11::X11)
+        target_compile_definitions(amuie PUBLIC AMUIE_HAVE_X11=1)
+    endif()
 endif()
 
 if(NOT MSVC)

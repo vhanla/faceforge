@@ -12,7 +12,13 @@ struct WindowDesc {
     int height = 800;
     const char* title = "AMUIE";
     bool undecorated = false;
+    // Request an ARGB framebuffer so the OS compositor can blend the desktop
+    // behind the window.
     bool transparent = false;
+    // Ask the compositor to blur the desktop behind the (translucent) window:
+    // DWM acrylic on Windows 11, KWin blur-behind on X11/KDE. Best effort; no
+    // effect on compositors without a matching API.
+    bool acrylic = false;
     bool resizable = true;
     int min_width = 480;   // logical minimum so the UI stays usable on resize
     int min_height = 360;
@@ -34,6 +40,16 @@ struct KeyEvent {
 
 Window* create(const WindowDesc& desc);
 void destroy(Window* window);
+
+// True when the running desktop exposes a blur-behind API this platform can
+// drive: DWM on Windows and KWin on X11/KDE. Applications use it to decide
+// whether acrylic should be on by default.
+bool acrylic_available();
+
+// Whether the window actually got an alpha-capable framebuffer. When false the
+// app should keep its opaque theme, otherwise translucent surfaces would be
+// composited against black.
+bool framebuffer_transparent(Window* window);
 
 void poll_events();
 
