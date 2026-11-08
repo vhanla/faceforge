@@ -19,6 +19,9 @@ struct Values {
     std::string export_dir;
     bool unload_after_run = false;
     bool check_updates = true;
+    // Translucent, compositor-blurred window (acrylic). Only read at startup,
+    // because the window is created before the rest of the settings apply.
+    bool acrylic = true;
     uint32_t update_interval_hours = 24;
     int64_t last_update_check = 0;
 };

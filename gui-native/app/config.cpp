@@ -189,6 +189,7 @@ bool load(const std::string& path, Values& out) {
     if (const std::string* p = str("export_dir")) out.export_dir = *p;
     if (const bool* b = boolean("unload_after_run")) out.unload_after_run = *b;
     if (const bool* b = boolean("check_updates")) out.check_updates = *b;
+    if (const bool* b = boolean("acrylic")) out.acrylic = *b;
     long long lv = 0;
     if (number("update_interval_hours", lv)) {
         out.update_interval_hours =
@@ -212,6 +213,7 @@ bool save(const std::string& path, const Values& v) {
     o << "  \"export_dir\": \"" << escape(v.export_dir) << "\",\n";
     o << "  \"unload_after_run\": " << (v.unload_after_run ? "true" : "false") << ",\n";
     o << "  \"check_updates\": " << (v.check_updates ? "true" : "false") << ",\n";
+    o << "  \"acrylic\": " << (v.acrylic ? "true" : "false") << ",\n";
     o << "  \"update_interval_hours\": " << v.update_interval_hours << ",\n";
     o << "  \"last_update_check\": " << v.last_update_check << "\n";
     o << "}\n";

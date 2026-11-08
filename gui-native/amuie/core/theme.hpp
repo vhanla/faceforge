@@ -133,13 +133,14 @@ inline const Theme& theme_light()     { return kThemeLight; }
 // Text, icons and small controls stay (nearly) opaque to remain legible.
 inline Theme make_acrylic(Theme t) {
     t.bg_window = Color{0x00, 0x00, 0x00, 0x00}; // clear: transparent black
-    t.bg_app.a = 0x9e;    // ~62% tint over the blur
+    t.bg_app.a = 0x9e;    // ~62% tint over the blur (canvas background, gaps)
     t.bg_header.a = 0xb4;
     t.bg_toolbar.a = 0xb4;
-    t.bg_panel.a = 0xb4;
-    t.bg_raised.a = 0xc8;
-    t.bg_control.a = 0xdc;
-    t.bg_control_hover.a = 0xe6;
+    // Panels sit over content (sidebars, modal dialogs); keep them readable.
+    t.bg_panel.a = 0xd8;
+    t.bg_raised.a = 0xe6;
+    t.bg_control.a = 0xf0;
+    t.bg_control_hover.a = 0xf5;
     return t;
 }
 

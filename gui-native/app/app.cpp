@@ -114,6 +114,7 @@ void App::loadConfig(const std::string& path) {
     export_dir = settings.export_dir;
     unload_after_run = settings.unload_after_run;
     check_updates = settings.check_updates;
+    acrylic = settings.acrylic;
     update_interval_hours = settings.update_interval_hours;
     last_update_check = settings.last_update_check;
 }
@@ -126,6 +127,7 @@ void App::saveConfig() {
     settings.export_dir = export_dir;
     settings.unload_after_run = unload_after_run;
     settings.check_updates = check_updates;
+    settings.acrylic = acrylic;
     settings.update_interval_hours = update_interval_hours;
     settings.last_update_check = last_update_check;
     if (config::save(config_path, settings)) config_dirty = false;

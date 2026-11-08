@@ -2064,7 +2064,7 @@ void settings_modal(Arena* a, UIContext* ctx, UIState* state) {
     ui_rect(a, ctx, Rect{0, 0, W, H}, Color{0, 0, 0, 0x85});
 
     const float modal_w = 440.0f;
-    const float modal_h = 340.0f;
+    const float modal_h = 410.0f;
     const Rect modal{(W - modal_w) * 0.5f, (H - modal_h) * 0.5f, modal_w, modal_h};
 
     ui_rect(a, ctx, modal, t.bg_panel, 10.0f);
@@ -2128,6 +2128,25 @@ void settings_modal(Arena* a, UIContext* ctx, UIState* state) {
         state->app->markConfigDirty();
     }
     row_y += 34.0f;
+
+    // Acrylic background: the window is created before settings load, so this
+    // preference only takes effect on the next launch.
+    bool acrylic = state->app ? state->app->acrylic : state->acrylic;
+    ui_checkbox(a, ctx, modal.x + 20.0f, row_y, "Acrylic background", &acrylic, &t);
+    if (state->app && acrylic != state->app->acrylic) {
+        state->app->acrylic = acrylic;
+        state->app->markConfigDirty();
+        state->acrylic_pending_restart = (acrylic != state->acrylic);
+    }
+    row_y += 24.0f;
+    const char* acrylic_note = state->acrylic_pending_restart
+                                   ? "Restart FaceForge to apply"
+                                   : (!platform::acrylic_available()
+                                          ? "Not available on this desktop"
+                                          : "Translucent window with blurred desktop");
+    ui_text(a, ctx, modal.x + 40.0f, row_y, acrylic_note,
+            state->acrylic_pending_restart ? t.accent : t.text_dim, 12.0f, 2);
+    row_y += 26.0f;
 
     if (state->app) {
         ui_text(a, ctx, modal.x + 20.0f, row_y,

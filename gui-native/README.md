@@ -81,6 +81,8 @@ right-click to toggle Erase/Restore. Size, hardness and opacity are sliders; the
 red overlay ("Show retouch mask") and "View original" are preview toggles. The
 retouched image is what save/copy/apply use. `FACEFORGE_STUDIO=1` opens Studio at
 startup and `FACEFORGE_STUDIO_PAINT=1` paints a sample stroke for screenshots.
+`FACEFORGE_SETTINGS=1` opens the Settings dialog at startup for scripted
+screenshots.
 
 ### Acrylic background
 
@@ -88,7 +90,11 @@ The window uses the Fluent/KDE "acrylic" treatment: a transparent framebuffer
 over a compositor-blurred desktop, with translucent theme surfaces and opaque
 text, icons and controls. It is on by default when the desktop can host it and
 can be forced with `--acrylic` or disabled with `--no-acrylic` (or by running on
-a compositor without a blur API).
+a compositor without a blur API). `FACEFORGE_ACRYLIC=0/1` overrides it for a
+single run, and Settings -> "Acrylic background" persists the preference to the
+settings file. Because the window is created before the settings are applied,
+changing it there takes effect after restarting the application; the dialog
+shows a "Restart FaceForge to apply" note until then.
 
 - `amuie/core/theme.hpp`: `make_acrylic()` and the acrylic dark/light themes
   lower the alpha of `bg_app`/`bg_header`/`bg_panel`/... and set the clear color

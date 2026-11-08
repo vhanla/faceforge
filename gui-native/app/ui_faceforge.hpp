@@ -36,6 +36,8 @@ struct UIState {
     // Acrylic background: translucent surfaces over a compositor-blurred
     // desktop (set by the entry point from the window/platform options).
     bool acrylic = false;
+    // True after the Settings checkbox was changed, until the next launch.
+    bool acrylic_pending_restart = false;
     AppMode mode = AppMode::Photo;
 
     // Navigation rail:

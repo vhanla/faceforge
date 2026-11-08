@@ -152,6 +152,9 @@ struct App {
     bool show_settings = false;
     bool show_about = false;
     bool check_updates = true;
+    // Persisted acrylic/translucent-window preference. It is applied when the
+    // window is created, so changing it needs an application restart.
+    bool acrylic = true;
     uint32_t update_interval_hours = 24;
     int64_t last_update_check = 0;
 

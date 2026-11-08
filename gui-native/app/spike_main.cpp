@@ -385,9 +385,31 @@ int dispatch_commands(OpenGL3Backend& backend, UIContext& ui) {
 
 int main(int argc, char** argv) {
     const Options options = parse_args(argc, argv);
-    // Acrylic is opt-out: enable it on desktops whose compositor can blur
-    // behind the window.
-    const bool acrylic = options.acrylic_set ? options.acrylic : platform::acrylic_available();
+
+    // The settings file is read here as well as by the app layer: the window is
+    // created before the app exists, but acrylic has to be decided at creation
+    // time (changing it later takes an application restart).
+    const bool test_mode = std::getenv("FACEFORGE_SELFTEST") != nullptr ||
+                           std::getenv("FACEFORGE_VIDEOTEST") != nullptr;
+    const char* env_config = std::getenv("FACEFORGE_CONFIG");
+    const bool explicit_config = !options.config.empty() || env_config != nullptr;
+    const bool config_enabled = !options.no_config && (!test_mode || explicit_config);
+    const std::string config_path =
+        !options.config.empty() ? options.config
+        : env_config            ? env_config
+                                : config::defaultPath();
+
+    // Precedence: CLI > environment > settings file > platform default.
+    bool acrylic_wanted = true;
+    if (config_enabled) {
+        config::Values boot;
+        if (config::load(config_path, boot)) acrylic_wanted = boot.acrylic;
+    }
+    if (const char* v = std::getenv("FACEFORGE_ACRYLIC")) {
+        acrylic_wanted = !(v[0] == '0' || v[0] == 'n' || v[0] == 'N' || v[0] == 'f' || v[0] == 'F');
+    }
+    if (options.acrylic_set) acrylic_wanted = options.acrylic;
+    const bool acrylic = acrylic_wanted && platform::acrylic_available();
 
     platform::WindowDesc desc;
     desc.width = options.width;
@@ -422,24 +444,19 @@ int main(int argc, char** argv) {
     app::Video* video = new app::Video(app);
 
     // ---- configuration precedence: CLI > environment > file > defaults ----
-    const bool test_mode = std::getenv("FACEFORGE_SELFTEST") != nullptr ||
-                           std::getenv("FACEFORGE_VIDEOTEST") != nullptr;
-    const char* env_config = std::getenv("FACEFORGE_CONFIG");
-    const bool explicit_config = !options.config.empty() || env_config != nullptr;
-    if (!options.no_config && (!test_mode || explicit_config)) {
-        std::string path = !options.config.empty() ? options.config
-                           : env_config                 ? env_config
-                                                        : config::defaultPath();
-        app->loadConfig(path);
-    }
+    if (config_enabled) app->loadConfig(config_path);
     apply_env(*app, options);
     apply_cli(*app, options);
+    // Keep the Settings checkbox in sync with the acrylic preference used for
+    // this session (CLI/env overrides included).
+    app->acrylic = acrylic_wanted;
 
     state->app = app;
     state->video = video;
     state->light_theme = options.light;
     state->acrylic = acrylic_on;
     state->mode = options.video ? AppMode::Video : AppMode::Photo;
+    if (std::getenv("FACEFORGE_SETTINGS")) state->show_settings = true;
     std::snprintf(state->models_dir, sizeof(state->models_dir), "%s", app->model_dir.c_str());
 
     if (std::getenv("FACEFORGE_SELFTEST")) {
