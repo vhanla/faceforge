@@ -1961,6 +1961,7 @@ bool Video::runAnalyze() {
         batch.clear();
         for (int64_t fi = start;
              fi <= end && !cancel_.load(std::memory_order_acquire); fi += job_stride_) {
+            waitWhilePaused();
             ff::Image src = video.frame(fi);
             if (!src.valid()) continue;
             ff_face faces[kVideoMaxFaces];
@@ -2010,6 +2011,7 @@ bool Video::runProcess() {
     job_total_atomic_.store(static_cast<uint32_t>(span), std::memory_order_relaxed);
     uint32_t done = 0;
     for (int64_t f = job_from_; f <= job_to_ && !cancel_.load(std::memory_order_acquire); ++f) {
+        waitWhilePaused();
         processAndCache(*engine, video, f, q, sig, job_use_cache_);
         done += 1;
         job_done_atomic_.store(done, std::memory_order_relaxed);
@@ -2068,6 +2070,7 @@ bool Video::runExport() {
             }
             const int64_t part_end = std::min(f + chunk - 1, job_to_);
             for (; f <= part_end && !cancel_.load(std::memory_order_acquire); ++f) {
+                waitWhilePaused();
                 ff::Image frame_img = renderExportFrame(*engine, video, f, sig);
                 if (!frame_img.valid()) continue;
                 if (frame_img.width != w || frame_img.height != h) {
@@ -2127,6 +2130,11 @@ bool Video::runExport() {
 
     ff::VideoWriter writer;
     std::string werr;
+    for (;;) {
+        if (cancel_.load(std::memory_order_acquire)) return false;
+        if (!paused_.load(std::memory_order_acquire)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
     if (!writer.open(video_out.c_str(), w, h, fps, "libx264", 16, "veryfast", "ffmpeg", &werr)) {
         setJobError("Cannot start the video encoder (ffmpeg)");
         return false;
@@ -2144,6 +2152,7 @@ bool Video::runExport() {
             setJobError("Encoder rejected a frame");
             return false;
         }
+        waitWhilePaused();
         done += 1;
         job_done_atomic_.store(done, std::memory_order_relaxed);
         progress_atomic_.store(
@@ -2286,7 +2295,42 @@ void Video::startProcessChunk() {
     startProcessRange(start, std::min(start + chunk - 1, out_frame));
 }
 
-void Video::cancel() { cancel_.store(true, std::memory_order_release); }
+void Video::cancel() {
+    // Signal the worker and unpause it; poll() performs the join and cleanup
+    // once the worker sets done_. Do not join here.
+    paused_.store(false, std::memory_order_release);
+    cancel_.store(true, std::memory_order_release);
+}
+
+void Video::pause() {
+    if (job == VideoJob::None) {
+        return;
+    }
+    paused_.store(true, std::memory_order_release);
+}
+
+void Video::resume() {
+    if (job == VideoJob::None) {
+        return;
+    }
+    paused_.store(false, std::memory_order_release);
+}
+
+void Video::togglePause() {
+    if (job == VideoJob::None) {
+        return;
+    }
+    paused_.store(!paused_.load(std::memory_order_acquire), std::memory_order_release);
+}
+
+void Video::waitWhilePaused() {
+    // Do not advance the frame index while paused: sleep until resumed or
+    // cancelled. cancel() clears paused_, so this always terminates.
+    while (paused_.load(std::memory_order_acquire) &&
+           !cancel_.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+}
 
 void Video::clearAnalysis() {
     {

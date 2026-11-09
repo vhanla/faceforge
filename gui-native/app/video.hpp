@@ -154,7 +154,14 @@ public:
     void startProcessSequence();
     void startProcessChunk();
     void startProcessRange(int64_t from, int64_t to);
+    // Job control. cancel() hard-stops the worker and also resumes a paused job.
     void cancel();
+    void pause();
+    void resume();
+    void togglePause();
+    bool paused() const { return paused_.load(std::memory_order_acquire); }
+    // Blocks the worker while paused; returns immediately when resumed/cancelled.
+    void waitWhilePaused();
     void clearAnalysis();
     // Starts an export to the current default output path.
     void startExport(bool whole);
@@ -380,6 +387,7 @@ private:
     // Job handoff fields (written by the UI thread before the worker starts).
     std::thread thread_;
     std::atomic<bool> cancel_{false};
+    std::atomic<bool> paused_{false};
     std::atomic<bool> done_{false};
     std::atomic<bool> ok_{false};
     std::atomic<uint32_t> progress_atomic_{0};

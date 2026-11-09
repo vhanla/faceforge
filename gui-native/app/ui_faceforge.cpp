@@ -1273,19 +1273,36 @@ void video_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
             t.text_muted, 12.0f);
     cur_y += 42.0f;
 
-    if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 110.0f, 30.0f}, 0, "Analyze range",
+    if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 150.0f, 30.0f}, 0, "Analyze range",
                             t.accent_dim, 6.0f, 0.0f, 12.5f, true, t.on_accent)) {
         v->startAnalyze();
     }
-    if (ui_button_icon_text(a, ctx, Rect{x + 128.0f, cur_y, 64.0f, 30.0f}, 0, "Cancel",
-                            t.bg_control, 6.0f, 0.0f, 12.0f, false, tone_control_text(t))) {
-        v->cancel();
-    }
-    if (ui_button_icon_text(a, ctx, Rect{x + 198.0f, cur_y, 56.0f, 30.0f}, 0, "Clear",
+    if (ui_button_icon_text(a, ctx, Rect{x + 168.0f, cur_y, 106.0f, 30.0f}, 0, "Clear",
                             t.bg_control, 6.0f, 0.0f, 12.0f, false, tone_control_text(t))) {
         v->clearAnalysis();
     }
     cur_y += 36.0f;
+    if (v->job != app::VideoJob::None) {
+        if (v->paused()) {
+            if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 130.0f, 30.0f}, 0,
+                                    "Resume", t.accent, 6.0f, 0.0f, 12.0f, true, t.on_accent)) {
+                v->resume();
+            }
+        } else {
+            if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 130.0f, 30.0f}, 0,
+                                    "Pause", t.bg_control, 6.0f, 0.0f, 12.0f, false,
+                                    tone_control_text(t))) {
+                v->pause();
+            }
+        }
+        if (ui_button_icon_text(a, ctx, Rect{x + 148.0f, cur_y, 130.0f, 30.0f}, 0, "Stop",
+                                Color{0xb4, 0x3a, 0x34, 0xff}, 6.0f, 0.0f, 12.0f, true,
+                                Color{0xff, 0xff, 0xff, 0xff})) {
+            v->cancel();
+        }
+        cur_y += 36.0f;
+    }
+    cur_y += 4.0f;
 
     int chunk_done = 0, chunk_total = 1;
     v->chunkStats(&chunk_done, &chunk_total);
@@ -1623,8 +1640,8 @@ void video_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
                                 t.bg_control, 6.0f, 0.0f, 12.5f, true, tone_control_text(t))) {
             v->startProcessSequence();
         }
+        cur_y += 38.0f;
     }
-    cur_y += 38.0f;
     if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, w - 24.0f, 32.0f}, ICON_PLAY_FILLED,
                             arena_fmt(a, "Process chunk %d/%d", chunk_idx + 1, chunk_count),
                             t.bg_control_hover, 6.0f, 16.0f, 12.5f, true,
@@ -1633,6 +1650,27 @@ void video_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     }
     cur_y += 38.0f;
     if (v->job == app::VideoJob::Process) {
+        const Rect b{Rect{x + 12.0f, cur_y, 64.0f, 30.0f}};
+        if (v->paused()) {
+            if (ui_button_icon_text(a, ctx, b, 0, "Resume", t.accent, 6.0f, 0.0f, 12.0f,
+                                    true, t.on_accent)) {
+                v->resume();
+            }
+        } else {
+            if (ui_button_icon_text(a, ctx, b, 0, "Pause", t.bg_control, 6.0f, 0.0f, 12.0f,
+                                    false, tone_control_text(t))) {
+                v->pause();
+            }
+            if (ui_button_icon_text(a, ctx, Rect{x + 86.0f, cur_y, 60.0f, 30.0f}, 0,
+                                    "Stop", Color{0xb4, 0x3a, 0x34, 0xff}, 6.0f, 0.0f, 12.0f,
+                                    true, Color{0xff, 0xff, 0xff, 0xff})) {
+                v->cancel();
+            }
+        }
+        if (v->paused()) {
+            ui_text(a, ctx, x + 152.0f, cur_y + 8.0f, "paused", t.text_dim, 11.5f);
+        }
+        cur_y += 38.0f;
         ui_progress(a, ctx, Rect{x + 14.0f, cur_y, w - 28.0f, 8.0f},
                     static_cast<float>(v->progress) / 1000.0f, t.bg_control, t.accent);
         cur_y += 14.0f;
