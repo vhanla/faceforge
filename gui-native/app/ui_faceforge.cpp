@@ -1128,11 +1128,19 @@ void photo_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
         std::vector<uint64_t> item_tex;
         face_combo_items(a, ids, items, storage, item_tex, state->identity_tex);
         float ry = inner_y + 8.0f;
-        const float row_h = 52.0f;
+        const float row_h = 54.0f;
         for (int i = 0; i < snap.count && ry + row_h <= inner_y + inner_h; ++i) {
             const Rect row{rx + 8.0f, ry, w - 16.0f, row_h - 6.0f};
+            const Rect cr{row.x + 48.0f, row.y + 24.0f, row.w - 52.0f, 22.0f};
+            const float mouth_w = 22.0f + 7.0f + text_width("Mouth", t.font_sm + 0.9f, 2);
+            const Rect mouth_r{row.x + 92.0f, row.y + 1.0f, mouth_w, 22.0f};
+            // Child widgets (combo, mouth toggle) are processed before the row so
+            // they can capture the click; the row interaction only sees clicks on
+            // the remaining body.
+            const bool over_child = ui_hovered(ctx, cr) || ui_hovered(ctx, mouth_r);
             const uint64_t rid = ui_hash_int(static_cast<uint64_t>(i), 0xface);
-            const UIInteraction rin = ui_process_interaction(ctx, rid, row);
+            const UIInteraction rin = over_child ? UIInteraction{}
+                                                 : ui_process_interaction(ctx, rid, row);
             const Color rbg = snap.sel[i] ? color_alpha(t.accent, 0x30)
                                           : (rin.hovered ? t.bg_control_hover : Color{0, 0, 0, 0});
             if (rbg.a > 0) ui_rect(a, ctx, row, rbg, 6.0f);
@@ -1146,10 +1154,15 @@ void photo_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
             }
             ui_rect_border(a, ctx, th, snap.sel[i] ? t.accent : t.border, 4.0f,
                            snap.sel[i] ? 2.0f : 1.0f);
-            ui_text_bold(a, ctx, row.x + 48.0f, row.y + 5.0f,
+            ui_text_bold(a, ctx, row.x + 48.0f, row.y + 3.0f,
                          arena_fmt(a, "Face %d", i + 1), t.text, 12.5f);
 
-            const Rect cr{row.x + 92.0f, row.y + 9.0f, row.w - 96.0f, 26.0f};
+            // Per-face mouth-restore override, defaulting to the global option.
+            bool mouth = snap.mouth_set[i] ? snap.mouth[i] : (app ? app->restore_mouth : true);
+            if (ui_checkbox(a, ctx, mouth_r.x, mouth_r.y, "Mouth", &mouth, &t) && app) {
+                app->setFaceMouth(i, mouth == app->restore_mouth ? -1 : (mouth ? 1 : 0));
+            }
+
             int sel_idx;
             if (!snap.sel[i]) sel_idx = ids.count + 1;
             else if (snap.identity[i] >= 0 && snap.identity[i] < ids.count) sel_idx = snap.identity[i] + 1;
@@ -1170,8 +1183,8 @@ void photo_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
                 }
             }
 
-            // Clicking the row body (not the combo/thumb border) toggles it.
-            if (rin.clicked && !ui_hovered(ctx, cr) && app) app->toggleFace(i);
+            // Clicking the row body (not the combo/mouth controls) toggles it.
+            if (rin.clicked && app) app->toggleFace(i);
             ry += row_h;
         }
     }
@@ -1771,6 +1784,31 @@ void video_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
                 }
             }
         }
+
+        // View controls (Fit / 1:1), mirroring the photo canvas.
+        const float cw = 40.0f;
+        const float ch = 30.0f;
+        const Rect one{view_r.x + view_r.w - 12.0f - cw, view_r.y + 8.0f, cw, ch};
+        const Rect fit{one.x - cw - 6.0f, view_r.y + 8.0f, cw, ch};
+        if (ui_button_icon_text(a, ctx, fit, 0, "Fit", t.bg_control, 6.0f, 0.0f, 13.0f,
+                                true, tone_control_text(t))) {
+            state->fit = true;
+            state->zoom = 1.0f;
+            state->pan_x = 0.0f;
+            state->pan_y = 0.0f;
+        }
+        if (ui_button_icon_text(a, ctx, one, 0, "1:1", color_alpha(t.bg_control, 0x80), 6.0f,
+                                0.0f, 13.0f, true, color_mix(t.text_muted, t.text, 0.6f))) {
+            state->fit = false;
+            state->zoom = 1.0f;
+            state->pan_x = 0.0f;
+            state->pan_y = 0.0f;
+        }
+        const int zoom_pct =
+            static_cast<int>((state->fit ? fit_scale : state->zoom) * 100.0f + 0.5f);
+        ui_text_right(a, ctx,
+                      Rect{fit.x - 88.0f, view_r.y + 8.0f, 82.0f, ch},
+                      arena_fmt(a, "zoom %d%%", zoom_pct), t.text, 13.0f, 2);
     } else {
         ui_text_center(a, ctx, view_r, "Decoding frame...", t.text_muted, 13.0f);
     }
