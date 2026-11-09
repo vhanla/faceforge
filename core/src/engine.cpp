@@ -15,6 +15,13 @@
 #include <unistd.h>
 #endif
 
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#define FF_X86 1
+#include <immintrin.h>
+#else
+#define FF_X86 0
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -108,6 +115,124 @@ ff_face pick_best_face(const std::vector<ff_face>& faces) {
 }  // namespace ff
 
 using namespace ff;
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// CPU-dispatched hot loops
+// ---------------------------------------------------------------------------
+// The packaged build stays generic and probes the CPU once at runtime. The
+// vector paths are limited to functions where the scalar version is a proven
+// bottleneck (see docs/optimization.md) and produce bit-identical bytes.
+
+bool have_avx2_fma() {
+#if FF_X86 && (defined(__GNUC__) || defined(__clang__))
+    static const bool ok = __builtin_cpu_supports("avx2") &&
+                           __builtin_cpu_supports("fma");
+    return ok;
+#else
+    return false;
+#endif
+}
+
+void blend_mask_same_size_scalar(uint8_t* dst, const uint8_t* src,
+                                 const uint8_t* mask, int width, int height) {
+    for (int y = 0; y < height; ++y) {
+        const size_t row = static_cast<size_t>(y) * width;
+        uint8_t* drow = dst + row * 3;
+        const uint8_t* srow = src + row * 3;
+        const uint8_t* mrow = mask + row;
+        for (int x = 0; x < width; ++x) {
+            const float a = static_cast<float>(mrow[x]) * (1.0f / 255.0f);
+            if (a <= 0.0001f) continue;
+            const float ia = 1.0f - a;
+            uint8_t* d = drow + static_cast<size_t>(x) * 3;
+            const uint8_t* s = srow + static_cast<size_t>(x) * 3;
+            for (int c = 0; c < 3; ++c) {
+                d[c] = static_cast<uint8_t>(
+                    static_cast<float>(d[c]) * ia + static_cast<float>(s[c]) * a + 0.5f);
+            }
+        }
+    }
+}
+
+#if FF_X86 && (defined(__GNUC__) || defined(__clang__))
+__attribute__((target("avx2,fma"), always_inline)) inline __m256
+load8_u8_as_f32(const uint8_t* p) {
+    return _mm256_cvtepi32_ps(
+        _mm256_cvtepu8_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(p))));
+}
+
+__attribute__((target("avx2,fma"), always_inline)) inline void
+store8_f32_as_u8(uint8_t* p, __m256 v) {
+    const __m256i iv = _mm256_cvttps_epi32(_mm256_add_ps(v, _mm256_set1_ps(0.5f)));
+    const __m128i lo = _mm256_castsi256_si128(iv);
+    const __m128i hi = _mm256_extracti128_si256(iv, 1);
+    const __m128i p16 = _mm_packus_epi32(lo, hi);
+    const __m128i p8 = _mm_packus_epi16(p16, p16);
+    _mm_storel_epi64(reinterpret_cast<__m128i*>(p), p8);
+}
+
+// Same-size 8-bit mask blend over interleaved BGR. Eight pixels per iteration:
+// the mask bytes become eight alpha floats, then three permutes expand them to
+// the 24 interleaved channels (RGB of each pixel repeats its alpha).
+__attribute__((target("avx2,fma")))
+void blend_mask_same_size_avx2(uint8_t* dst, const uint8_t* src,
+                               const uint8_t* mask, int width, int height) {
+    const __m256 inv255 = _mm256_set1_ps(1.0f / 255.0f);
+    const __m256 one = _mm256_set1_ps(1.0f);
+    const __m256i idx0 = _mm256_setr_epi32(0, 0, 0, 1, 1, 1, 2, 2);
+    const __m256i idx1 = _mm256_setr_epi32(2, 3, 3, 3, 4, 4, 4, 5);
+    const __m256i idx2 = _mm256_setr_epi32(5, 5, 6, 6, 6, 7, 7, 7);
+
+    for (int y = 0; y < height; ++y) {
+        const size_t row = static_cast<size_t>(y) * width;
+        uint8_t* drow = dst + row * 3;
+        const uint8_t* srow = src + row * 3;
+        const uint8_t* mrow = mask + row;
+        int x = 0;
+        for (; x + 8 <= width; x += 8) {
+            const __m128i mb =
+                _mm_loadl_epi64(reinterpret_cast<const __m128i*>(mrow + x));
+            if (_mm_testz_si128(mb, mb)) continue;  // untouched area: keep dst
+            const __m256 af = _mm256_mul_ps(
+                _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(mb)), inv255);
+            uint8_t* d = drow + static_cast<size_t>(x) * 3;
+            const uint8_t* s = srow + static_cast<size_t>(x) * 3;
+
+            const __m256 a0 = _mm256_permutevar8x32_ps(af, idx0);
+            const __m256 a1 = _mm256_permutevar8x32_ps(af, idx1);
+            const __m256 a2 = _mm256_permutevar8x32_ps(af, idx2);
+
+            const __m256 o0 = _mm256_fmadd_ps(load8_u8_as_f32(s + 0), a0,
+                                              _mm256_mul_ps(load8_u8_as_f32(d + 0),
+                                                           _mm256_sub_ps(one, a0)));
+            const __m256 o1 = _mm256_fmadd_ps(load8_u8_as_f32(s + 8), a1,
+                                              _mm256_mul_ps(load8_u8_as_f32(d + 8),
+                                                           _mm256_sub_ps(one, a1)));
+            const __m256 o2 = _mm256_fmadd_ps(load8_u8_as_f32(s + 16), a2,
+                                              _mm256_mul_ps(load8_u8_as_f32(d + 16),
+                                                           _mm256_sub_ps(one, a2)));
+            store8_f32_as_u8(d + 0, o0);
+            store8_f32_as_u8(d + 8, o1);
+            store8_f32_as_u8(d + 16, o2);
+        }
+        for (; x < width; ++x) {
+            const float a = static_cast<float>(mrow[x]) * (1.0f / 255.0f);
+            if (a <= 0.0001f) continue;
+            const float ia = 1.0f - a;
+            uint8_t* d = drow + static_cast<size_t>(x) * 3;
+            const uint8_t* s = srow + static_cast<size_t>(x) * 3;
+            for (int c = 0; c < 3; ++c) {
+                d[c] = static_cast<uint8_t>(
+                    static_cast<float>(d[c]) * ia + static_cast<float>(s[c]) * a + 0.5f);
+            }
+        }
+    }
+}
+#endif  // FF_X86 && GCC/Clang
+
+}  // namespace
 
 extern "C" {
 
@@ -701,8 +826,42 @@ int32_t ff_blend_mask(uint8_t* dst_bgr, const uint8_t* original_bgr,
         return FF_ERR_INVALID;
 
     const bool same_size = (mask_w == width && mask_h == height);
-    const float sx = same_size ? 1.0f : static_cast<float>(mask_w) / static_cast<float>(width);
-    const float sy = same_size ? 1.0f : static_cast<float>(mask_h) / static_cast<float>(height);
+#if FF_X86 && (defined(__GNUC__) || defined(__clang__))
+    const bool use_simd = have_avx2_fma();
+#endif
+    if (same_size) {
+#if FF_X86 && (defined(__GNUC__) || defined(__clang__))
+        if (use_simd) {
+            blend_mask_same_size_avx2(dst_bgr, original_bgr, mask, width, height);
+            return FF_OK;
+        }
+#endif
+        blend_mask_same_size_scalar(dst_bgr, original_bgr, mask, width, height);
+        return FF_OK;
+    }
+    // A mask at a different resolution (downscaled preview) is resampled once
+    // with OpenCV and then blended with the same-size kernel. The half-pixel
+    // mapping matches the scalar fallback below.
+    try {
+        cv::Mat src_mask(mask_h, mask_w, CV_8UC1, const_cast<uint8_t*>(mask));
+        cv::Mat scaled;
+        cv::resize(src_mask, scaled, cv::Size(width, height), 0, 0, cv::INTER_LINEAR);
+        if (!scaled.empty() && scaled.isContinuous()) {
+            const uint8_t* m = scaled.ptr<uint8_t>();
+#if FF_X86 && (defined(__GNUC__) || defined(__clang__))
+            if (use_simd) {
+                blend_mask_same_size_avx2(dst_bgr, original_bgr, m, width, height);
+            } else
+#endif
+            {
+                blend_mask_same_size_scalar(dst_bgr, original_bgr, m, width, height);
+            }
+            return FF_OK;
+        }
+    } catch (const std::exception&) {
+    }
+    const float sx = static_cast<float>(mask_w) / static_cast<float>(width);
+    const float sy = static_cast<float>(mask_h) / static_cast<float>(height);
 
     for (int y = 0; y < height; ++y) {
         uint8_t* dst = dst_bgr + static_cast<size_t>(y) * width * 3;

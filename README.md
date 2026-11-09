@@ -260,6 +260,13 @@ and the GUI. `zig build run` launches the app.
 `zig build -Dversion=0.2.0` stamps the version shown in About and used by the
 update checker; the release workflow derives it from the git tag.
 
+Release packages stay generic on purpose. Hot loops detect AVX2/FMA at runtime
+and fall back to scalar code otherwise. For a local build tuned to your own
+CPU, configure CMake with `-DFF_NATIVE_BUILD=ON` (`-march=native` on
+GCC/Clang, `/arch:AVX2` on MSVC). See
+[`docs/optimization.md`](docs/optimization.md) for the measurements and the
+newer-hardware TODO.
+
 ## Using the GUI
 
 The window is split into an identity rail (left), the canvas (centre) and the

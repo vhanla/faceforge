@@ -14,6 +14,20 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+# Hot loops already dispatch to AVX2/FMA at runtime, so packaged binaries stay
+# portable and still use the vector paths on capable CPUs. This option is for
+# local builds that want the compiler to tune every loop for the build host.
+option(FF_NATIVE_BUILD "Optimize for the build machine's CPU" OFF)
+if(FF_NATIVE_BUILD)
+    if(MSVC)
+        # MSVC has no -march=native; AVX2 is the closest portable equivalent.
+        add_compile_options(/arch:AVX2)
+    else()
+        add_compile_options(-march=native -mtune=native)
+    endif()
+    message(STATUS "FF_NATIVE_BUILD: tuning for the build machine")
+endif()
+
 # Pin all artifacts to the build root so build.zig can find them regardless of
 # the generator (Makefiles/Ninja vs. Visual Studio multi-config).
 set(_ff_out ${CMAKE_BINARY_DIR})
@@ -89,10 +103,19 @@ if(UNIX)
     )
 endif()
 
+# Models-free micro-benchmark for the CPU fast paths.
+add_executable(ffblend bench/blend_main.cpp)
+target_link_libraries(ffblend PRIVATE faceforge)
+if(UNIX)
+    set_target_properties(ffblend PROPERTIES
+        BUILD_RPATH "${FF_ORT_ROOT}/lib;${CMAKE_CURRENT_BINARY_DIR}"
+    )
+endif()
+
 # On Windows the ONNX Runtime and provider DLLs must sit next to the binaries.
 if(WIN32)
     file(GLOB FF_ORT_DLLS "${FF_ORT_ROOT}/lib/*.dll")
-    foreach(_target faceforge ffbench)
+    foreach(_target faceforge ffbench ffblend)
         # OpenCV ships as a normal imported target, so this copies its runtime
         # DLL next to the executable as well ($<TARGET_RUNTIME_DLLS> needs 3.21).
         add_custom_command(TARGET ${_target} POST_BUILD
@@ -109,7 +132,7 @@ if(WIN32)
     endforeach()
 endif()
 
-install(TARGETS faceforge ffbench RUNTIME DESTINATION bin LIBRARY DESTINATION lib)
+install(TARGETS faceforge ffbench ffblend RUNTIME DESTINATION bin LIBRARY DESTINATION lib)
 if(WIN32)
     install(FILES ${FF_ORT_DLLS} DESTINATION bin)
 endif()

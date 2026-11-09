@@ -332,10 +332,20 @@ int swap_patch(Engine& e, const cv::Mat& bgr, const ff_face& face,
     to_blob(aligned, 0.0f, 255.0f, input);
 
     std::vector<float> latent(512, 0.0f);
-    for (int j = 0; j < 512; ++j) {
-        double acc = 0.0;
-        for (int i = 0; i < 512; ++i) acc += embedding[i] * emap[i * 512 + j];
-        latent[j] = static_cast<float>(acc);
+    {
+        // Traverse emap row by row so each cache line is consumed once. The
+        // summation order per output stays i = 0..511, so the result is
+        // bit-identical to the naive column-major loop.
+        std::vector<double> acc(512, 0.0);
+        for (int i = 0; i < 512; ++i) {
+            const float ei = embedding[i];
+            const float* row = emap.data() + static_cast<size_t>(i) * 512;
+            for (int j = 0; j < 512; ++j) {
+                const float prod = ei * row[j];
+                acc[j] += static_cast<double>(prod);
+            }
+        }
+        for (int j = 0; j < 512; ++j) latent[j] = static_cast<float>(acc[j]);
     }
     l2_normalize(latent.data(), 512);
 
