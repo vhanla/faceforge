@@ -163,6 +163,14 @@ bool ui_combo(Arena* arena, UIContext* ctx, Rect rect,
               int* selected_index, const Theme* theme,
               uint64_t id = 0);
 
+// Combo variant for media/identity lists: `textures` (aligned with `items`,
+// 0 for no image) draws a thumbnail before each label and the selected check
+// moves to the right edge. Labels are ellipsized to the item bounds.
+bool ui_combo_media(Arena* arena, UIContext* ctx, Rect rect,
+                    const char* const* items, const uint64_t* textures,
+                    int item_count, int* selected_index, const Theme* theme,
+                    uint64_t id = 0);
+
 bool ui_combo_selector_items(Arena* arena, UIContext* ctx, LayoutContext* layout, float height,
                              const char* title, const char* const* items, int item_count,
                              int* selected_index, ComboStyle style,

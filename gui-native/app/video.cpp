@@ -1887,7 +1887,10 @@ bool Video::spawn(VideoJob kind) {
         setStatus("Wait for the current photo job to finish", true);
         return false;
     }
-    if (!host_ || host_->identityCount() == 0) {
+    // Analysis only detects faces and stores samples; identities are needed
+    // when a swap is actually rendered (process/export).
+    if ((kind == VideoJob::Process || kind == VideoJob::Encode) &&
+        (!host_ || host_->identityCount() == 0)) {
         setStatus("Add an identity image first", true);
         return false;
     }

@@ -887,10 +887,10 @@ static const char* combo_label(Arena* arena, const char* text) {
     return out;
 }
 
-bool ui_combo(Arena* arena, UIContext* ctx, Rect rect,
-              const char* const* items, int item_count,
-              int* selected_index, const Theme* theme,
-              uint64_t id) {
+static bool combo_impl(Arena* arena, UIContext* ctx, Rect rect,
+                       const char* const* items, const uint64_t* textures,
+                       int item_count, int* selected_index, const Theme* theme,
+                       uint64_t id, bool check_right) {
     if (!ctx || !items || item_count <= 0) return false;
     if (!theme) theme = ctx->theme ? ctx->theme : &theme_faceforge();
     if (!id) id = ui_get_id_rect(ctx, rect);
@@ -918,9 +918,19 @@ bool ui_combo(Arena* arena, UIContext* ctx, Rect rect,
     const int sel = (selected_index && *selected_index >= 0 && *selected_index < item_count)
                         ? *selected_index : 0;
     const char* sel_text = combo_label(arena, items[sel]);
+    const uint64_t sel_tex = textures ? textures[sel] : 0;
 
-    ui_text(arena, ctx, rect.x + 7.0f, rect.y + 6.0f,
-            sel_text, theme->text, 14.2f, 2);
+    float sel_text_x = rect.x + 7.0f;
+    if (sel_tex != 0) {
+        const float th = std::min(18.0f, rect.h - 6.0f);
+        ui_image(arena, ctx, Rect{rect.x + 5.0f, rect.y + (rect.h - th) * 0.5f, th, th},
+                 sel_tex, Color{0xff, 0xff, 0xff, 0xff});
+        sel_text_x = rect.x + 8.0f + th;
+    }
+    const float sel_max_w = rect.x + rect.w - 32.0f - sel_text_x;
+    ui_text(arena, ctx, sel_text_x, rect.y + 6.0f,
+            ui_text_ellipsized(arena, sel_text, 14.2f, 2, sel_max_w),
+            theme->text, 14.2f, 2);
 
     // Chevron down (0xE00A)
     ui_icon(arena, ctx, rect.x + rect.w - 30.0f, rect.y + 9.0f,
@@ -968,15 +978,33 @@ bool ui_combo(Arena* arena, UIContext* ctx, Rect rect,
             const Color text_col = is_sel ? theme->on_accent
                                           : (item_in.hovered ? theme->text : color_mix(theme->text, theme->text_muted, 0.2f));
 
-            if (is_sel) {
+            if (is_sel && !check_right) {
                 ui_icon(arena, ctx, item_r.x + 8.0f, item_r.y + (item_h - 13.0f) * 0.5f,
                         0xE017u, theme->on_accent, 13.0f);
             }
 
-            const float text_x = item_r.x + (is_sel ? 26.0f : 10.0f);
+            float text_x = item_r.x + (is_sel && !check_right ? 26.0f : 10.0f);
+            const uint64_t tex = textures ? textures[i] : 0;
+            if (tex != 0) {
+                const float th = 20.0f;
+                ui_image(arena, ctx, Rect{item_r.x + 6.0f, item_r.y + (item_h - th) * 0.5f, th, th},
+                         tex, Color{0xff, 0xff, 0xff, 0xff});
+                text_x = item_r.x + 32.0f;
+            }
+
+            if (is_sel && check_right) {
+                ui_icon(arena, ctx, item_r.x + item_r.w - 22.0f,
+                        item_r.y + (item_h - 13.0f) * 0.5f, 0xE017u,
+                        theme->on_accent, 13.0f);
+            }
+
+            const float text_max_w =
+                item_r.x + item_r.w - text_x - (check_right || is_sel ? 26.0f : 10.0f);
             ui_text(arena, ctx, text_x,
                     item_r.y + (item_h - font_line_height(13.5f)) * 0.5f,
-                    combo_label(arena, items[i]), text_col, 13.5f, 2);
+                    ui_text_ellipsized(arena, combo_label(arena, items[i]), 13.5f, 2,
+                                       text_max_w),
+                    text_col, 13.5f, 2);
 
             if (item_in.clicked) {
                 if (selected_index) *selected_index = i;
@@ -990,6 +1018,22 @@ bool ui_combo(Arena* arena, UIContext* ctx, Rect rect,
     }
 
     return changed;
+}
+
+bool ui_combo(Arena* arena, UIContext* ctx, Rect rect,
+              const char* const* items, int item_count,
+              int* selected_index, const Theme* theme,
+              uint64_t id) {
+    return combo_impl(arena, ctx, rect, items, nullptr, item_count, selected_index,
+                      theme, id, false);
+}
+
+bool ui_combo_media(Arena* arena, UIContext* ctx, Rect rect,
+                    const char* const* items, const uint64_t* textures,
+                    int item_count, int* selected_index, const Theme* theme,
+                    uint64_t id) {
+    return combo_impl(arena, ctx, rect, items, textures, item_count, selected_index,
+                      theme, id, true);
 }
 
 bool ui_combo_selector_items(Arena* arena, UIContext* ctx, LayoutContext* layout, float height,

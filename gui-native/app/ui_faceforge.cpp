@@ -976,18 +976,24 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
 
 // Builds the combo item labels for a face row: Default, each identity, Skip.
 void face_combo_items(Arena* a, const app::IdentitiesSnapshot& ids,
-                      std::vector<const char*>& items, std::vector<std::string>& storage) {
+                      std::vector<const char*>& items, std::vector<std::string>& storage,
+                      std::vector<uint64_t>& textures, const uint64_t* identity_tex) {
     storage.clear();
     items.clear();
+    textures.clear();
     storage.reserve(static_cast<size_t>(ids.count) + 2);
+    textures.reserve(static_cast<size_t>(ids.count) + 2);
     storage.push_back("Default");
     items.push_back(storage.back().c_str());
+    textures.push_back(0);
     for (int i = 0; i < ids.count; ++i) {
         storage.push_back(ids.labels[i]);
         items.push_back(storage.back().c_str());
+        textures.push_back(identity_tex ? identity_tex[i] : 0);
     }
     storage.push_back("Skip face");
     items.push_back(storage.back().c_str());
+    textures.push_back(0);
     (void)a;
 }
 
@@ -1048,7 +1054,8 @@ void photo_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
     } else {
         std::vector<const char*> items;
         std::vector<std::string> storage;
-        face_combo_items(a, ids, items, storage);
+        std::vector<uint64_t> item_tex;
+        face_combo_items(a, ids, items, storage, item_tex, state->identity_tex);
         float ry = inner_y + 8.0f;
         const float row_h = 52.0f;
         for (int i = 0; i < snap.count && ry + row_h <= inner_y + inner_h; ++i) {
@@ -1076,8 +1083,9 @@ void photo_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
             if (!snap.sel[i]) sel_idx = ids.count + 1;
             else if (snap.identity[i] >= 0 && snap.identity[i] < ids.count) sel_idx = snap.identity[i] + 1;
             else sel_idx = 0;
-            if (ui_combo(a, ctx, cr, items.data(), static_cast<int>(items.size()), &sel_idx, &t,
-                         ui_hash_int(static_cast<uint64_t>(i), 0xc0b0))) {
+            if (ui_combo_media(a, ctx, cr, items.data(), item_tex.data(),
+                               static_cast<int>(items.size()), &sel_idx, &t,
+                               ui_hash_int(static_cast<uint64_t>(i), 0xc0b0))) {
                 if (app) {
                     if (sel_idx == ids.count + 1) {
                         app->setFaceSelected(i, false);
@@ -1369,6 +1377,10 @@ void video_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         for (int k = 0; k < nid; ++k) storage.push_back(ids.labels[k]);
         storage.push_back("(leave unchanged)");
         for (auto& s : storage) items.push_back(s.c_str());
+        std::vector<uint64_t> item_tex(storage.size(), 0);
+        for (int k = 0; k < nid; ++k) {
+            if (k < app::kMaxIdentities) item_tex[static_cast<size_t>(k) + 1] = state->identity_tex[k];
+        }
         const int skip_choice = nid + 1;
 
         for (int k = 0; k < seg.count && k < app::kVideoMaxFaces; ++k) {
@@ -1389,8 +1401,9 @@ void video_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
             else if (v->seg_ids[k] >= 0) choice = std::min(v->seg_ids[k] + 1, nid);
             else choice = 0;
             const Rect cr{row.x + 50.0f, row.y + 18.0f, row.w - 54.0f, 26.0f};
-            if (ui_combo(a, ctx, cr, items.data(), static_cast<int>(items.size()), &choice, &t,
-                         ui_hash_int(static_cast<uint64_t>(k), 0x1d70))) {
+            if (ui_combo_media(a, ctx, cr, items.data(), item_tex.data(),
+                               static_cast<int>(items.size()), &choice, &t,
+                               ui_hash_int(static_cast<uint64_t>(k), 0x1d70))) {
                 if (choice == 0) v->setSegId(k, -1);
                 else if (choice == skip_choice) v->setSegId(k, app::kVideoSkipId);
                 else v->setSegId(k, choice - 1);
@@ -1919,10 +1932,17 @@ void video_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
         ui_text(a, ctx, rx + 16.0f, cur_y, "No identities yet.", t.text_muted, 12.5f);
         cur_y += 24.0f;
     } else {
-        const float chip = 44.0f, gap = 7.0f;
-        const int max_chips = 4;
+        const float chip = 40.0f, gap = 6.0f;
+        const int max_chips = 5;
         for (int i = 0; i < ids.count && i < max_chips; ++i) {
             const Rect cr{rx + 14.0f + i * (chip + gap), cur_y, chip, chip};
+            const uint64_t del_id = ui_hash_int(static_cast<uint64_t>(i), 0x1d3f);
+            const Rect del{cr.x + chip - 15.0f, cr.y + chip - 15.0f, 14.0f, 14.0f};
+            const UIInteraction del_in = ui_process_interaction(ctx, del_id, del);
+
+            const uint64_t cid = ui_hash_int(static_cast<uint64_t>(i), 0x1d3e);
+            const UIInteraction in = ui_process_interaction(ctx, cid, cr);
+
             if (state->identity_tex[i] != 0) {
                 ui_image(a, ctx, cr, state->identity_tex[i], Color{0xff, 0xff, 0xff, 0xff});
             } else {
@@ -1930,10 +1950,31 @@ void video_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
                 ui_icon_center(a, ctx, cr, ICON_USER_FILLED, t.text_muted, 20.0f);
             }
             const bool is_default = i == ids.default_identity;
-            ui_rect_border(a, ctx, cr, is_default ? t.accent : color_alpha(t.border, 0xc0), 6.0f,
-                           is_default ? 2.5f : 1.0f);
+            const Color ring = is_default ? t.accent
+                                          : (in.hovered ? t.text_muted : color_alpha(t.border, 0xc0));
+            ui_rect_border(a, ctx, cr, ring, 6.0f, is_default ? 2.5f : 1.0f);
+
+            ui_rect(a, ctx, del, del_in.hovered ? Color{0xb4, 0x3a, 0x34, 0xff}
+                                               : color_alpha(t.bg_window, 0xd0), 7.0f);
+            ui_icon_center(a, ctx, del, ICON_TRASH,
+                           del_in.hovered ? Color{0xff, 0xff, 0xff, 0xff} : t.text_muted, 9.0f);
+            if (del_in.clicked && app) {
+                app->removeIdentity(i);
+                break;
+            }
+            if (in.clicked && app) app->selectDefaultIdentity(i);
+        }
+        if (ids.count > max_chips) {
+            ui_text(a, ctx, rx + 14.0f + static_cast<float>(max_chips) * (chip + gap), cur_y + 12.0f,
+                    arena_fmt(a, "+%d", ids.count - max_chips), t.text_dim, 12.0f);
         }
         cur_y += chip + 8.0f;
+        if (ui_button_icon_text(a, ctx, Rect{rx + 12.0f, cur_y, w - 24.0f, 28.0f}, ICON_TRASH,
+                                "Clear all identities", t.bg_control, 5.0f, 14.0f, 11.5f, false,
+                                tone_control_text(t))) {
+            if (app) app->clearIdentities();
+        }
+        cur_y += 34.0f;
     }
     ui_separator(a, ctx, rx + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
