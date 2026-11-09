@@ -201,6 +201,12 @@ public:
     VidSegment segment(int index) const;
     int sampleCount() const;
     void chunkStats(int* done, int* total) const;
+    // Bounds of the chunk that contains `frame` inside [in_frame, out_frame].
+    // `index` is 0-based and `count` is the number of chunks in the range.
+    bool chunkInfo(int64_t frame, int64_t* start, int64_t* end, int* index,
+                   int* count) const;
+    // Moves the playhead to the start of the previous/next analyzed chunk.
+    void stepChunk(int delta);
     void idsForFrame(int64_t frame, int count, int32_t out[kVideoMaxFaces]) const;
     int boxesForFrame(int64_t frame, float out[kVideoMaxFaces][4]) const;
     int editsInRange(int64_t a, int64_t b) const;

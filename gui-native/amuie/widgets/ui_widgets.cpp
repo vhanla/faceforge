@@ -876,6 +876,17 @@ void ui_stat_row(Arena* arena, UIContext* ctx, Rect r, const char* label,
                   theme->text, theme->font_sm);
 }
 
+// Render commands keep the text pointer until the frame is dispatched, so any
+// label that may come from a temporary string must be copied into the arena.
+static const char* combo_label(Arena* arena, const char* text) {
+    if (!arena || !text) return text;
+    const size_t n = std::strlen(text) + 1;
+    char* out = static_cast<char*>(arena->alloc(n, 1));
+    if (!out) return text;
+    std::memcpy(out, text, n);
+    return out;
+}
+
 bool ui_combo(Arena* arena, UIContext* ctx, Rect rect,
               const char* const* items, int item_count,
               int* selected_index, const Theme* theme,
@@ -906,7 +917,7 @@ bool ui_combo(Arena* arena, UIContext* ctx, Rect rect,
 
     const int sel = (selected_index && *selected_index >= 0 && *selected_index < item_count)
                         ? *selected_index : 0;
-    const char* sel_text = items[sel];
+    const char* sel_text = combo_label(arena, items[sel]);
 
     ui_text(arena, ctx, rect.x + 7.0f, rect.y + 6.0f,
             sel_text, theme->text, 14.2f, 2);
@@ -965,7 +976,7 @@ bool ui_combo(Arena* arena, UIContext* ctx, Rect rect,
             const float text_x = item_r.x + (is_sel ? 26.0f : 10.0f);
             ui_text(arena, ctx, text_x,
                     item_r.y + (item_h - font_line_height(13.5f)) * 0.5f,
-                    items[i], text_col, 13.5f, 2);
+                    combo_label(arena, items[i]), text_col, 13.5f, 2);
 
             if (item_in.clicked) {
                 if (selected_index) *selected_index = i;

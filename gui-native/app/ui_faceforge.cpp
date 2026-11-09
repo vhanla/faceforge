@@ -1236,8 +1236,24 @@ void video_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
                   ui_hash_str("vid_chunk"))) {
         v->chunk_f = std::round(chunk / 30.0f) * 30.0f;
     }
+    int chunk_idx = 0, chunk_count = 1;
+    int64_t chunk_start = 0, chunk_end = 0;
+    v->chunkInfo(v->cur, &chunk_start, &chunk_end, &chunk_idx, &chunk_count);
     ui_text(a, ctx, x + 16.0f, cur_y + 18.0f,
-            arena_fmt(a, "Chunk %d", static_cast<int>(std::llround(v->chunk_f))), t.text_muted, 12.0f);
+            ui_text_ellipsized(a,
+                               arena_fmt(a, "Chunk %d/%d \xC2\xB7 %lld-%lld", chunk_idx + 1,
+                                         chunk_count, static_cast<long long>(chunk_start),
+                                         static_cast<long long>(chunk_end)),
+                               12.0f, 0, w - 152.0f),
+            t.text_muted, 12.0f);
+    if (ui_button_icon_text(a, ctx, Rect{x + w - 124.0f, cur_y + 12.0f, 52.0f, 24.0f}, 0, "Prev",
+                            t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
+        v->stepChunk(-1);
+    }
+    if (ui_button_icon_text(a, ctx, Rect{x + w - 66.0f, cur_y + 12.0f, 52.0f, 24.0f}, 0, "Next",
+                            t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
+        v->stepChunk(1);
+    }
     cur_y += 42.0f;
     float stride = v->stride_f;
     if (ui_slider(a, ctx, Rect{x + 16.0f, cur_y, w - 32.0f, 18.0f}, &stride, 1.0f, 30.0f, &t,
@@ -1597,7 +1613,8 @@ void video_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     }
     cur_y += 38.0f;
     if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, w - 24.0f, 32.0f}, ICON_PLAY_FILLED,
-                            "Process current chunk", t.bg_control_hover, 6.0f, 16.0f, 12.5f, true,
+                            arena_fmt(a, "Process chunk %d/%d", chunk_idx + 1, chunk_count),
+                            t.bg_control_hover, 6.0f, 16.0f, 12.5f, true,
                             tone_control_text(t))) {
         v->startProcessChunk();
     }

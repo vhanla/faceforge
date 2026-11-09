@@ -957,6 +957,37 @@ void Video::chunkStats(int* done, int* total) const {
     if (done) *done = d;
 }
 
+bool Video::chunkInfo(int64_t frame, int64_t* start, int64_t* end, int* index,
+                      int* count) const {
+    const int64_t chunk = std::max<int64_t>(1, static_cast<int64_t>(std::llround(chunk_f)));
+    const int64_t first = std::max<int64_t>(0, in_frame);
+    const int64_t last = std::max<int64_t>(first, out_frame);
+    const int64_t span = last - first + 1;
+    const int total = static_cast<int>(std::max<int64_t>(1, (span + chunk - 1) / chunk));
+    const int64_t clamped = std::clamp<int64_t>(frame, first, last);
+    const int idx = static_cast<int>(std::min<int64_t>((clamped - first) / chunk,
+                                                       static_cast<int64_t>(total) - 1));
+    const int64_t s = first + static_cast<int64_t>(idx) * chunk;
+    if (start) *start = s;
+    if (end) *end = std::min<int64_t>(last, s + chunk - 1);
+    if (index) *index = idx;
+    if (count) *count = total;
+    return true;
+}
+
+void Video::stepChunk(int delta) {
+    if (!open_ || delta == 0) return;
+    const int64_t chunk = std::max<int64_t>(1, static_cast<int64_t>(std::llround(chunk_f)));
+    int64_t start = 0;
+    int idx = 0, count = 0;
+    chunkInfo(cur, &start, nullptr, &idx, &count);
+    const int target = std::clamp(idx + delta, 0, std::max(0, count - 1));
+    if (target == idx) return;
+    stopPlayback();
+    seekTo(start + static_cast<int64_t>(target - idx) * chunk);
+    selectSegmentAt(cur);
+}
+
 void Video::mergeSamples(const std::vector<VidSample>& batch, int64_t from, int64_t to) {
     std::lock_guard<std::mutex> lk(data_mu_);
     size_t i = 0;
