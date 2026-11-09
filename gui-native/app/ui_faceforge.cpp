@@ -241,9 +241,17 @@ void nav_sidebar(Arena* a, UIContext* ctx, UIState* state, float rail_w) {
 
     if (draw_rail_item(116.0f, ICON_PHOTO, "Photo", state->mode == AppMode::Photo)) {
         state->mode = AppMode::Photo;
+        state->fit = true;
+        state->zoom = 1.0f;
+        state->pan_x = 0.0f;
+        state->pan_y = 0.0f;
     }
     if (draw_rail_item(162.0f, ICON_PLAY_FILLED, "Video", state->mode == AppMode::Video)) {
         state->mode = AppMode::Video;
+        state->fit = true;
+        state->zoom = 1.0f;
+        state->pan_x = 0.0f;
+        state->pan_y = 0.0f;
     }
 
     const float bot_y = 64.0f + rail_h - 10.0f;
@@ -333,14 +341,14 @@ void toolbar(Arena* a, UIContext* ctx, UIState* state, float rail_w) {
                         std::snprintf(state->video_path, sizeof(state->video_path), "%s", p.c_str());
                     }
                 } else if (i == 1) {
-                    app->setStatus("Clipboard video paste is not supported yet", true);
+                    state->paste_request = 3;
                 } else if (i == 2) {
                     const std::string p = platform::open_file_dialog(
                         "Add identity image",
                         "*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff", "");
                     if (!p.empty()) app->addIdentityFile(p);
                 } else {
-                    app->setStatus("Clipboard image paste is not supported yet", true);
+                    state->paste_request = 2;
                 }
             } else if (i == 0) {
                 const std::string p = platform::open_file_dialog(
@@ -352,14 +360,14 @@ void toolbar(Arena* a, UIContext* ctx, UIState* state, float rail_w) {
                     state->sync_output_path = true;
                 }
             } else if (i == 1) {
-                app->setStatus("Clipboard image paste is not supported yet", true);
+                state->paste_request = 1;
             } else if (i == 2) {
                 const std::string p = platform::open_file_dialog(
                     "Add identity image",
                     "*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff", "");
                 if (!p.empty()) app->addIdentityFile(p);
             } else {
-                app->setStatus("Clipboard image paste is not supported yet", true);
+                state->paste_request = 2;
             }
         }
         cur_x += kToolbarW[i] + 8.0f;
@@ -442,7 +450,9 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         }
         const int di = std::clamp(ids.default_identity, 0, ids.count - 1);
         ui_text(a, ctx, x + 21.0f, oy + 82.0f,
-                arena_fmt(a, "Default: %s", ids.labels[di].c_str()), t.text_dim, 12.5f);
+                ui_text_ellipsized(a, arena_fmt(a, "Default: %s", ids.labels[di].c_str()),
+                                   12.5f, 0, 245.0f),
+                t.text_dim, 12.5f);
     }
 
     const Rect ident_area{x + 21.0f, oy + 30.0f, 245.0f, 105.0f};
@@ -462,7 +472,7 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
                 "Add identity image", "*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff", "");
             if (!p.empty()) app->addIdentityFile(p);
         } else if (ident_pick == 1) {
-            app->setStatus("Clipboard image paste is not supported yet", true);
+            state->paste_request = 2;
         } else if (ident_pick == 3) {
             app->clearIdentities();
         }
@@ -734,6 +744,7 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     const float dx = L.canvas_x - (L.left_x + L.left_w + 10.0f);
     const float row_right = L.canvas_x + L.canvas_w;
     auto row_fits = [&](float px, float pw) { return px + pw <= row_right + 0.5f; };
+    state->canvas_drag_ready = false;
 
     const float top_ctrl_y = 144.0f;
     ui_checkbox(a, ctx, L.canvas_x + 1.0f, top_ctrl_y + 6.0f, "Overlay", &state->overlay, &t);
@@ -746,6 +757,8 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         if (ui_button_icon_text(a, ctx, fit, 0, "Fit", t.bg_control, 6.0f, 0.0f, 13.0f, true, tone_control_text(t))) {
             state->fit = true;
             state->zoom = 1.0f;
+            state->pan_x = 0.0f;
+            state->pan_y = 0.0f;
         }
     }
     if (row_fits(L.canvas_x + 245.0f, 40.0f)) {
@@ -753,6 +766,8 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         if (ui_button_icon_text(a, ctx, one, 0, "1:1", color_alpha(t.bg_control, 0x80), 6.0f, 0.0f, 13.0f, true, color_mix(t.text_muted, t.text, 0.6f))) {
             state->fit = false;
             state->zoom = 1.0f;
+            state->pan_x = 0.0f;
+            state->pan_y = 0.0f;
         }
     }
     if (row_fits(L.canvas_x + 300.0f, 70.0f)) {
@@ -788,7 +803,9 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
             { .label = "Clear Canvas", .icon = ICON_TRASH }
         };
         const int menu_pick = ui_context_menu(a, ctx, canvas_menu_id, kCanvasMenuItems, 7, &t);
-        if (menu_pick == 1) {
+        if (menu_pick == 0) {
+            state->paste_request = 1;
+        } else if (menu_pick == 1) {
             if (app) {
                 const std::string p = platform::open_file_dialog(
                     "Open target image", "*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff",
@@ -801,9 +818,13 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         } else if (menu_pick == 3) {
             state->fit = true;
             state->zoom = 1.0f;
+            state->pan_x = 0.0f;
+            state->pan_y = 0.0f;
         } else if (menu_pick == 4) {
             state->fit = false;
             state->zoom = 1.0f;
+            state->pan_x = 0.0f;
+            state->pan_y = 0.0f;
         } else if (menu_pick == 6) {
             if (app) app->clearTarget();
         }
@@ -879,14 +900,63 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         const float pad = 8.0f;
         const float avail_w = canvas.w - pad * 2.0f;
         const float avail_h = canvas.h - pad * 2.0f;
-        float scale = std::min(avail_w / ref_w, avail_h / ref_h);
+        const float fit_scale = std::min(avail_w / ref_w, avail_h / ref_h);
+        const bool over_canvas = ctx->mouse_x >= canvas.x && ctx->mouse_x <= canvas.x + canvas.w &&
+                                 ctx->mouse_y >= canvas.y && ctx->mouse_y <= canvas.y + canvas.h;
+
+        // Viewport navigation (disabled in Studio, where the left button paints
+        // and the canvas maps 1:1 to the base image): wheel zooms anchored at
+        // the cursor and the middle button pans.
+        if (!studio) {
+            static bool pan_drag = false;
+            static float pan_last_x = 0.0f, pan_last_y = 0.0f;
+            if (over_canvas && ctx->mouse_middle_down) {
+                if (!pan_drag) {
+                    pan_drag = true;
+                    pan_last_x = ctx->mouse_x;
+                    pan_last_y = ctx->mouse_y;
+                } else {
+                    state->pan_x += ctx->mouse_x - pan_last_x;
+                    state->pan_y += ctx->mouse_y - pan_last_y;
+                    pan_last_x = ctx->mouse_x;
+                    pan_last_y = ctx->mouse_y;
+                }
+            } else if (!ctx->mouse_middle_down) {
+                pan_drag = false;
+            }
+
+            if (over_canvas && ctx->scroll_delta != 0.0f) {
+                const float cur = state->fit ? fit_scale : state->zoom;
+                const float next = std::clamp(cur * std::pow(1.12f, ctx->scroll_delta),
+                                              fit_scale * 0.1f,
+                                              std::max(1.0f, fit_scale * 24.0f));
+                const float cur_dst_x = canvas.x + (canvas.w - ref_w * cur) * 0.5f + state->pan_x;
+                const float cur_dst_y = canvas.y + (canvas.h - ref_h * cur) * 0.5f + state->pan_y;
+                const float ix = (ctx->mouse_x - cur_dst_x) / cur;
+                const float iy = (ctx->mouse_y - cur_dst_y) / cur;
+                state->pan_x = ctx->mouse_x - ix * next - canvas.x - (canvas.w - ref_w * next) * 0.5f;
+                state->pan_y = ctx->mouse_y - iy * next - canvas.y - (canvas.h - ref_h * next) * 0.5f;
+                state->zoom = next;
+                state->fit = false;
+            }
+        }
+
+        float scale = fit_scale;
         if (!state->fit) scale = state->zoom;
         const float iw = ref_w * scale;
         const float ih = ref_h * scale;
-        const Rect dst{canvas.x + (canvas.w - iw) * 0.5f,
-                       canvas.y + (canvas.h - ih) * 0.5f, iw, ih};
+        const Rect dst{canvas.x + (canvas.w - iw) * 0.5f + state->pan_x,
+                       canvas.y + (canvas.h - ih) * 0.5f + state->pan_y, iw, ih};
+        // Clip the (possibly zoomed) image and its overlays to the canvas so
+        // they never paint over the sidebars.
+        ui_clip(a, ctx, canvas);
         ui_image(a, ctx, dst, tex, Color{0xff, 0xff, 0xff, 0xff});
         ui_rect_border(a, ctx, dst, t.border, 4.0f, 1.0f);
+
+        // Drag-out: publish the displayed image rect so the entry point can
+        // start an OS drag of the result. Studio disables it.
+        state->canvas_drag_rect = dst;
+        state->canvas_drag_ready = !studio;
 
         // Studio red mask overlay (straight alpha, uploaded base-resolution).
         // It covers the same base area as the image, so it aligns with `dst`.
@@ -935,6 +1005,7 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
                         arena_fmt(a, "Face %d", i + 1), box_col, 10.5f, 2);
             }
         }
+        ui_clip(a, ctx, Rect{0, 0, ctx->screen_w, ctx->screen_h});
         return;
     }
 
@@ -1189,7 +1260,7 @@ void video_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         return;
     }
 
-    const float content_h = 1180.0f;
+    const float content_h = 820.0f;
     const float max_scroll = std::max(0.0f, content_h - (view_bottom - view_y));
     state->video_left_scroll = std::clamp(state->video_left_scroll, 0.0f, max_scroll);
     const float oy = view_y + 8.0f - state->video_left_scroll;
@@ -1200,7 +1271,9 @@ void video_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     const Rect file_card{x + 10.0f, oy, w - 20.0f, 76.0f};
     ui_rect(a, ctx, file_card, t.bg_raised, 6.0f);
     ui_rect_border(a, ctx, file_card, t.border, 6.0f, 1.0f);
-    ui_text(a, ctx, file_card.x + 10.0f, file_card.y + 8.0f, v->name().c_str(), t.text, 13.0f, 2);
+    ui_text(a, ctx, file_card.x + 10.0f, file_card.y + 8.0f,
+            ui_text_ellipsized(a, v->name().c_str(), 13.0f, 2, file_card.w - 68.0f),
+            t.text, 13.0f, 2);
     if (ui_button_icon_text(a, ctx, Rect{file_card.x + file_card.w - 52.0f, file_card.y + 6.0f, 44.0f, 22.0f},
                             0, "Close", t.bg_control, 4.0f, 0.0f, 11.5f, false, t.text_muted)) {
         v->close_requested = true;
@@ -1594,138 +1667,6 @@ void video_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         }
     }
 
-    ui_separator(a, ctx, x + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
-    cur_y += 12.0f;
-
-    // ---- process ----
-    section_header(a, ctx, t, x, cur_y, ICON_SLIDERS_FILLED, "Process & cache");
-    cur_y += 30.0f;
-    {
-        bool low = v->low_quality;
-        if (ui_checkbox(a, ctx, x + 16.0f, cur_y, "Low quality", &low, &t)) v->low_quality = low;
-        bool uc = v->process_use_cache;
-        if (ui_checkbox(a, ctx, x + 150.0f, cur_y, "Use cache", &uc, &t)) v->process_use_cache = uc;
-    }
-    cur_y += 26.0f;
-    {
-        bool mouth = app ? app->restore_mouth : true;
-        if (ui_checkbox(a, ctx, x + 16.0f, cur_y, "Restore mouths", &mouth, &t)) {
-            if (app) app->restore_mouth = mouth;
-        }
-        bool dskip = v->default_skip;
-        if (ui_checkbox(a, ctx, x + 150.0f, cur_y, "Skip unassigned", &dskip, &t)) {
-            v->default_skip = dskip;
-            v->selectSegmentAt(v->cur);
-        }
-    }
-    cur_y += 28.0f;
-    if (v->low_quality) {
-        ui_text(a, ctx, x + 16.0f, cur_y, "Fast 640 px pass \xC2\xB7 enhancer off", t.text_dim, 12.0f);
-    } else if (app && app->enhancer == app::Enhancer::None) {
-        ui_text(a, ctx, x + 16.0f, cur_y, "Full res \xC2\xB7 enhancer: none", t.text_dim, 12.0f);
-    } else if (v->enhancer_failed) {
-        ui_text(a, ctx, x + 16.0f, cur_y, "Full res \xC2\xB7 enhancer failed for this clip",
-                Color{0xe0, 0xa0, 0x4a, 0xff}, 12.0f);
-    } else {
-        ui_text(a, ctx, x + 16.0f, cur_y, "Full res \xC2\xB7 enhancer on", t.text_dim, 12.0f);
-    }
-    cur_y += 24.0f;
-    {
-        const float b2 = (w - 28.0f) * 0.5f;
-        if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, b2, 32.0f}, 0, "Process frame",
-                                t.bg_control, 6.0f, 0.0f, 12.5f, true, tone_control_text(t))) {
-            v->startProcessFrame();
-        }
-        if (ui_button_icon_text(a, ctx, Rect{x + 16.0f + b2, cur_y, b2, 32.0f}, 0, "Process seq",
-                                t.bg_control, 6.0f, 0.0f, 12.5f, true, tone_control_text(t))) {
-            v->startProcessSequence();
-        }
-        cur_y += 38.0f;
-    }
-    if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, w - 24.0f, 32.0f}, ICON_PLAY_FILLED,
-                            arena_fmt(a, "Process chunk %d/%d", chunk_idx + 1, chunk_count),
-                            t.bg_control_hover, 6.0f, 16.0f, 12.5f, true,
-                            tone_control_text(t))) {
-        v->startProcessChunk();
-    }
-    cur_y += 38.0f;
-    if (v->job == app::VideoJob::Process) {
-        const Rect b{Rect{x + 12.0f, cur_y, 64.0f, 30.0f}};
-        if (v->paused()) {
-            if (ui_button_icon_text(a, ctx, b, 0, "Resume", t.accent, 6.0f, 0.0f, 12.0f,
-                                    true, t.on_accent)) {
-                v->resume();
-            }
-        } else {
-            if (ui_button_icon_text(a, ctx, b, 0, "Pause", t.bg_control, 6.0f, 0.0f, 12.0f,
-                                    false, tone_control_text(t))) {
-                v->pause();
-            }
-            if (ui_button_icon_text(a, ctx, Rect{x + 86.0f, cur_y, 60.0f, 30.0f}, 0,
-                                    "Stop", Color{0xb4, 0x3a, 0x34, 0xff}, 6.0f, 0.0f, 12.0f,
-                                    true, Color{0xff, 0xff, 0xff, 0xff})) {
-                v->cancel();
-            }
-        }
-        if (v->paused()) {
-            ui_text(a, ctx, x + 152.0f, cur_y + 8.0f, "paused", t.text_dim, 11.5f);
-        }
-        cur_y += 38.0f;
-        ui_progress(a, ctx, Rect{x + 14.0f, cur_y, w - 28.0f, 8.0f},
-                    static_cast<float>(v->progress) / 1000.0f, t.bg_control, t.accent);
-        cur_y += 14.0f;
-        ui_text(a, ctx, x + 16.0f, cur_y,
-                arena_fmt(a, "processing %u/%u", v->job_done_frames, v->job_total_frames),
-                t.text_muted, 12.0f);
-        cur_y += 24.0f;
-    }
-
-    ui_separator(a, ctx, x + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
-    cur_y += 12.0f;
-
-    // ---- export ----
-    section_header(a, ctx, t, x, cur_y, ICON_SAVE, "Export");
-    cur_y += 30.0f;
-    {
-        bool audio = v->export_audio;
-        if (ui_checkbox(a, ctx, x + 16.0f, cur_y, "Audio", &audio, &t)) v->export_audio = audio;
-        bool chunks = v->export_chunks;
-        if (ui_checkbox(a, ctx, x + 120.0f, cur_y, "Split chunks", &chunks, &t)) v->export_chunks = chunks;
-    }
-    cur_y += 30.0f;
-    {
-        const float b2 = (w - 28.0f) * 0.5f;
-        if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, b2, 34.0f}, 0, "Export range",
-                                t.bg_control, 6.0f, 0.0f, 13.0f, true, tone_control_text(t))) {
-            const std::string def = video_stem(v->name()) + "_faceforge.mp4";
-            const std::string p = platform::save_file_dialog("Export range", "*.mp4", def.c_str(), def.c_str());
-            if (!p.empty()) v->startExportTo(p, v->in_frame, v->out_frame, v->export_audio, v->export_chunks);
-        }
-        if (ui_button_icon_text(a, ctx, Rect{x + 16.0f + b2, cur_y, b2, 34.0f}, 0, "Export all",
-                                t.bg_control, 6.0f, 0.0f, 13.0f, true, tone_control_text(t))) {
-            const int64_t last = v->info().frames > 0 ? v->info().frames - 1 : v->out_frame;
-            const std::string def = video_stem(v->name()) + "_faceforge.mp4";
-            const std::string p = platform::save_file_dialog("Export all", "*.mp4", def.c_str(), def.c_str());
-            if (!p.empty()) v->startExportTo(p, 0, last, v->export_audio, v->export_chunks);
-        }
-    }
-    cur_y += 40.0f;
-    if (v->job == app::VideoJob::Encode) {
-        ui_progress(a, ctx, Rect{x + 14.0f, cur_y, w - 28.0f, 8.0f},
-                    static_cast<float>(v->progress) / 1000.0f, t.bg_control, t.accent);
-        cur_y += 14.0f;
-        ui_text(a, ctx, x + 16.0f, cur_y,
-                arena_fmt(a, "encoding %u/%u", v->job_done_frames, v->job_total_frames), t.text_muted,
-                12.0f);
-        cur_y += 22.0f;
-        if (ui_button_icon_text(a, ctx, Rect{x + 12.0f, cur_y, 130.0f, 28.0f}, 0, "Cancel export",
-                                t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
-            v->cancel();
-        }
-        cur_y += 34.0f;
-    }
-    ui_text(a, ctx, x + 16.0f, cur_y, "Export runs at source resolution.", t.text_dim, 11.5f);
-
     ui_clip(a, ctx, Rect{0, 0, ctx->screen_w, ctx->screen_h});
 }
 
@@ -1764,11 +1705,51 @@ void video_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
 
     Rect drawn{0, 0, 0, 0};
     if (tex != 0 && tex_w > 0 && tex_h > 0) {
-        const float aspect = static_cast<float>(tex_w) / static_cast<float>(tex_h);
-        float iw = view_r.w - 16.0f;
-        float ih = view_r.h - 16.0f;
-        if (iw / ih > aspect) iw = ih * aspect; else ih = iw / aspect;
-        drawn = Rect{view_r.x + (view_r.w - iw) * 0.5f, view_r.y + (view_r.h - ih) * 0.5f, iw, ih};
+        const float ref_w = static_cast<float>(tex_w);
+        const float ref_h = static_cast<float>(tex_h);
+        const float fit_scale = std::min((view_r.w - 16.0f) / ref_w, (view_r.h - 16.0f) / ref_h);
+        const bool over_view = ctx->mouse_x >= view_r.x && ctx->mouse_x <= view_r.x + view_r.w &&
+                               ctx->mouse_y >= view_r.y && ctx->mouse_y <= view_r.y + view_r.h;
+
+        // Wheel zoom anchored at the cursor and middle-button pan.
+        static bool vid_pan_drag = false;
+        static float vid_pan_last_x = 0.0f, vid_pan_last_y = 0.0f;
+        if (over_view && ctx->mouse_middle_down) {
+            if (!vid_pan_drag) {
+                vid_pan_drag = true;
+                vid_pan_last_x = ctx->mouse_x;
+                vid_pan_last_y = ctx->mouse_y;
+            } else {
+                state->pan_x += ctx->mouse_x - vid_pan_last_x;
+                state->pan_y += ctx->mouse_y - vid_pan_last_y;
+                vid_pan_last_x = ctx->mouse_x;
+                vid_pan_last_y = ctx->mouse_y;
+            }
+        } else if (!ctx->mouse_middle_down) {
+            vid_pan_drag = false;
+        }
+        if (over_view && ctx->scroll_delta != 0.0f) {
+            const float cur = state->fit ? fit_scale : state->zoom;
+            const float next = std::clamp(cur * std::pow(1.12f, ctx->scroll_delta),
+                                          fit_scale * 0.1f,
+                                          std::max(1.0f, fit_scale * 24.0f));
+            const float cur_dst_x = view_r.x + (view_r.w - ref_w * cur) * 0.5f + state->pan_x;
+            const float cur_dst_y = view_r.y + (view_r.h - ref_h * cur) * 0.5f + state->pan_y;
+            const float ix = (ctx->mouse_x - cur_dst_x) / cur;
+            const float iy = (ctx->mouse_y - cur_dst_y) / cur;
+            state->pan_x = ctx->mouse_x - ix * next - view_r.x - (view_r.w - ref_w * next) * 0.5f;
+            state->pan_y = ctx->mouse_y - iy * next - view_r.y - (view_r.h - ref_h * next) * 0.5f;
+            state->zoom = next;
+            state->fit = false;
+        }
+
+        const float scale = state->fit ? fit_scale : state->zoom;
+        const float iw = ref_w * scale;
+        const float ih = ref_h * scale;
+        drawn = Rect{view_r.x + (view_r.w - iw) * 0.5f + state->pan_x,
+                     view_r.y + (view_r.h - ih) * 0.5f + state->pan_y, iw, ih};
+        // Keep the zoomed frame and its overlays inside the viewport.
+        ui_clip(a, ctx, view_r);
         ui_image(a, ctx, drawn, tex, Color{0xff, 0xff, 0xff, 0xff});
         ui_rect_border(a, ctx, drawn, color_alpha(t.border, 0xd0), 2.0f, 1.0f);
 
@@ -1817,6 +1798,8 @@ void video_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
                        v->studio_erase ? Color{0xff, 0x9a, 0x9a, 0xc0} : Color{0x9a, 0xff, 0xb4, 0xc0},
                        cursor_r, 1.5f);
     }
+
+    ui_clip(a, ctx, Rect{0, 0, ctx->screen_w, ctx->screen_h});
 
     // Transport.
     const float ty = top + view_h;
@@ -1960,7 +1943,14 @@ void video_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
     app::Video* v = state->video;
     app::App* app = state->app;
 
-    float cur_y = view_y + 12.0f;
+    // The right sidebar carries the identity library, cache, process and export
+    // sections; allow scrolling when they do not fit.
+    const float content_h = 1180.0f;
+    const float max_scroll = std::max(0.0f, content_h - (view_bottom - view_y));
+    state->video_right_scroll = std::clamp(state->video_right_scroll, 0.0f, max_scroll);
+    ui_clip(a, ctx, Rect{rx, view_y, w, view_bottom - view_y});
+
+    float cur_y = view_y + 12.0f - state->video_right_scroll;
     section_header(a, ctx, t, rx, cur_y, ICON_USER_FILLED, "Identity library");
     cur_y += 32.0f;
 
@@ -2046,6 +2036,144 @@ void video_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
     ui_separator(a, ctx, rx + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
     cur_y += 12.0f;
 
+    // ---- process & cache ----
+    section_header(a, ctx, t, rx, cur_y, ICON_SLIDERS_FILLED, "Process & cache");
+    cur_y += 30.0f;
+    {
+        bool low = v->low_quality;
+        if (ui_checkbox(a, ctx, rx + 16.0f, cur_y, "Low quality", &low, &t)) v->low_quality = low;
+        bool uc = v->process_use_cache;
+        if (ui_checkbox(a, ctx, rx + 122.0f, cur_y, "Use cache", &uc, &t)) v->process_use_cache = uc;
+    }
+    cur_y += 26.0f;
+    {
+        bool mouth = app ? app->restore_mouth : true;
+        if (ui_checkbox(a, ctx, rx + 16.0f, cur_y, "Restore mouths", &mouth, &t)) {
+            if (app) app->restore_mouth = mouth;
+        }
+        bool dskip = v->default_skip;
+        if (ui_checkbox(a, ctx, rx + 122.0f, cur_y, "Skip unassigned", &dskip, &t)) {
+            v->default_skip = dskip;
+            v->selectSegmentAt(v->cur);
+        }
+    }
+    cur_y += 28.0f;
+    if (v->low_quality) {
+        ui_text(a, ctx, rx + 16.0f, cur_y, "Fast 640 px pass \xC2\xB7 enhancer off", t.text_dim, 12.0f);
+    } else if (app && app->enhancer == app::Enhancer::None) {
+        ui_text(a, ctx, rx + 16.0f, cur_y, "Full res \xC2\xB7 enhancer: none", t.text_dim, 12.0f);
+    } else if (v->enhancer_failed) {
+        ui_text(a, ctx, rx + 16.0f, cur_y, "Full res \xC2\xB7 enhancer failed for this clip",
+                Color{0xe0, 0xa0, 0x4a, 0xff}, 12.0f);
+    } else {
+        ui_text(a, ctx, rx + 16.0f, cur_y, "Full res \xC2\xB7 enhancer on", t.text_dim, 12.0f);
+    }
+    cur_y += 24.0f;
+    {
+        const float b2 = (w - 28.0f) * 0.5f;
+        if (ui_button_icon_text(a, ctx, Rect{rx + 12.0f, cur_y, b2, 32.0f}, 0, "Process frame",
+                                t.bg_control, 6.0f, 0.0f, 12.5f, true, tone_control_text(t))) {
+            v->startProcessFrame();
+        }
+        if (ui_button_icon_text(a, ctx, Rect{rx + 16.0f + b2, cur_y, b2, 32.0f}, 0, "Process seq",
+                                t.bg_control, 6.0f, 0.0f, 12.5f, true, tone_control_text(t))) {
+            v->startProcessSequence();
+        }
+        cur_y += 38.0f;
+    }
+    {
+        int chunk_idx = 0, chunk_count = 1;
+        int64_t chunk_start = 0, chunk_end = 0;
+        v->chunkInfo(v->cur, &chunk_start, &chunk_end, &chunk_idx, &chunk_count);
+        if (ui_button_icon_text(a, ctx, Rect{rx + 12.0f, cur_y, w - 24.0f, 32.0f}, ICON_PLAY_FILLED,
+                                arena_fmt(a, "Process chunk %d/%d", chunk_idx + 1, chunk_count),
+                                t.bg_control_hover, 6.0f, 16.0f, 12.5f, true,
+                                tone_control_text(t))) {
+            v->startProcessChunk();
+        }
+    }
+    cur_y += 38.0f;
+    if (v->job == app::VideoJob::Process) {
+        const Rect b{Rect{rx + 12.0f, cur_y, 64.0f, 30.0f}};
+        if (v->paused()) {
+            if (ui_button_icon_text(a, ctx, b, 0, "Resume", t.accent, 6.0f, 0.0f, 12.0f,
+                                    true, t.on_accent)) {
+                v->resume();
+            }
+        } else {
+            if (ui_button_icon_text(a, ctx, b, 0, "Pause", t.bg_control, 6.0f, 0.0f, 12.0f,
+                                    false, tone_control_text(t))) {
+                v->pause();
+            }
+            if (ui_button_icon_text(a, ctx, Rect{rx + 86.0f, cur_y, 60.0f, 30.0f}, 0,
+                                    "Stop", Color{0xb4, 0x3a, 0x34, 0xff}, 6.0f, 0.0f, 12.0f,
+                                    true, Color{0xff, 0xff, 0xff, 0xff})) {
+                v->cancel();
+            }
+        }
+        if (v->paused()) {
+            ui_text(a, ctx, rx + 152.0f, cur_y + 8.0f, "paused", t.text_dim, 11.5f);
+        }
+        cur_y += 38.0f;
+        ui_progress(a, ctx, Rect{rx + 14.0f, cur_y, w - 28.0f, 8.0f},
+                    static_cast<float>(v->progress) / 1000.0f, t.bg_control, t.accent);
+        cur_y += 14.0f;
+        ui_text(a, ctx, rx + 16.0f, cur_y,
+                arena_fmt(a, "processing %u/%u", v->job_done_frames, v->job_total_frames),
+                t.text_muted, 12.0f);
+        cur_y += 24.0f;
+    }
+
+    ui_separator(a, ctx, rx + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
+    cur_y += 12.0f;
+
+    // ---- export ----
+    section_header(a, ctx, t, rx, cur_y, ICON_SAVE, "Export");
+    cur_y += 30.0f;
+    {
+        bool audio = v->export_audio;
+        if (ui_checkbox(a, ctx, rx + 16.0f, cur_y, "Audio", &audio, &t)) v->export_audio = audio;
+        bool chunks = v->export_chunks;
+        if (ui_checkbox(a, ctx, rx + 110.0f, cur_y, "Split chunks", &chunks, &t)) v->export_chunks = chunks;
+    }
+    cur_y += 30.0f;
+    {
+        const float b2 = (w - 28.0f) * 0.5f;
+        if (ui_button_icon_text(a, ctx, Rect{rx + 12.0f, cur_y, b2, 34.0f}, 0, "Export range",
+                                t.bg_control, 6.0f, 0.0f, 13.0f, true, tone_control_text(t))) {
+            const std::string def = video_stem(v->name()) + "_faceforge.mp4";
+            const std::string p = platform::save_file_dialog("Export range", "*.mp4", def.c_str(), def.c_str());
+            if (!p.empty()) v->startExportTo(p, v->in_frame, v->out_frame, v->export_audio, v->export_chunks);
+        }
+        if (ui_button_icon_text(a, ctx, Rect{rx + 16.0f + b2, cur_y, b2, 34.0f}, 0, "Export all",
+                                t.bg_control, 6.0f, 0.0f, 13.0f, true, tone_control_text(t))) {
+            const int64_t last = v->info().frames > 0 ? v->info().frames - 1 : v->out_frame;
+            const std::string def = video_stem(v->name()) + "_faceforge.mp4";
+            const std::string p = platform::save_file_dialog("Export all", "*.mp4", def.c_str(), def.c_str());
+            if (!p.empty()) v->startExportTo(p, 0, last, v->export_audio, v->export_chunks);
+        }
+    }
+    cur_y += 40.0f;
+    if (v->job == app::VideoJob::Encode) {
+        ui_progress(a, ctx, Rect{rx + 14.0f, cur_y, w - 28.0f, 8.0f},
+                    static_cast<float>(v->progress) / 1000.0f, t.bg_control, t.accent);
+        cur_y += 14.0f;
+        ui_text(a, ctx, rx + 16.0f, cur_y,
+                arena_fmt(a, "encoding %u/%u", v->job_done_frames, v->job_total_frames), t.text_muted,
+                12.0f);
+        cur_y += 22.0f;
+        if (ui_button_icon_text(a, ctx, Rect{rx + 12.0f, cur_y, 130.0f, 28.0f}, 0, "Cancel export",
+                                t.bg_control, 5.0f, 0.0f, 11.5f, false, tone_control_text(t))) {
+            v->cancel();
+        }
+        cur_y += 34.0f;
+    }
+    ui_text(a, ctx, rx + 16.0f, cur_y, "Export runs at source resolution.", t.text_dim, 11.5f);
+    cur_y += 24.0f;
+
+    ui_separator(a, ctx, rx + 14.0f, cur_y, w - 28.0f, color_alpha(t.border, 0x80));
+    cur_y += 12.0f;
+
     section_header(a, ctx, t, rx, cur_y, ICON_INFO, "Shortcuts");
     cur_y += 30.0f;
     auto shortcut_row = [&](const char* key, const char* desc) {
@@ -2058,6 +2186,8 @@ void video_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
     shortcut_row("Space", "Play / Pause");
     shortcut_row("< / >", "Step frame");
     shortcut_row("I / O", "Set in / out");
+
+    ui_clip(a, ctx, Rect{0, 0, ctx->screen_w, ctx->screen_h});
 }
 
 // ---------------------------------------------------------------------------
@@ -2340,7 +2470,12 @@ void faceforge_draw(Arena* frame, UIContext* ui, UIState* state) {
             } else {
                 state->video_left_scroll -= ui->scroll_delta * 42.0f;
             }
+        } else if (state->mode == AppMode::Video && L.show_right && ui->mouse_x >= L.right_x &&
+                   ui->mouse_x < L.right_x + L.right_w) {
+            state->video_right_scroll -= ui->scroll_delta * 42.0f;
         }
+        // The canvas zoom is handled inside the center panels, where the image
+        // layout is known, so a single wheel tick zooms at the cursor.
     }
 
     nav_sidebar(frame, ui, state, L.rail_w);

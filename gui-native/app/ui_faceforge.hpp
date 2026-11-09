@@ -48,6 +48,10 @@ struct UIState {
     bool original = false;
     bool fit = true;
     float zoom = 1.0f;
+    // Viewport pan (logical px) applied on top of the fit/zoom placement. Reset
+    // by Fit / 1:1 and driven by middle-mouse dragging over the canvas.
+    float pan_x = 0.0f;
+    float pan_y = 0.0f;
 
     float left_scroll = 0.0f;  // vertical scroll of the left sidebar (logical px)
     float studio_scroll = 0.0f;
@@ -56,7 +60,18 @@ struct UIState {
     // entry point); the screen only keeps presentation state.
     app::Video* video = nullptr;
     float video_left_scroll = 0.0f;
+    float video_right_scroll = 0.0f;
     char video_path[512] = "";
+
+    // Requests handled by the entry point (which owns the platform window):
+    // 0 none, 1 paste image as target, 2 paste image as identity,
+    // 3 paste video (unsupported).
+    int paste_request = 0;
+
+    // Canvas drag-out: the photo canvas publishes the displayed image rect and
+    // whether dragging the result out is allowed (false in Studio).
+    Rect canvas_drag_rect = {};
+    bool canvas_drag_ready = false;
 
     // Video canvas textures, filled by the entry point each frame.
     uint64_t vid_cur_tex = 0;

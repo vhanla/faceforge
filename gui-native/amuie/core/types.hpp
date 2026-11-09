@@ -63,6 +63,7 @@ struct UIContext {
     bool mouse_right_down = false;
     bool mouse_right_clicked = false;
     bool mouse_right_released = false;
+    bool mouse_middle_down = false;
 
     // Interaction IDs (persistent across frames):
     uint64_t active_id = 0;        // widget capturing left mouse down
