@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace platform {
 
@@ -65,6 +66,12 @@ int poll_drops(Window* window, const char** out, int max);
 // valid until the next clipboard call or window destruction.
 const char* clipboard_get_text(Window* window);
 void clipboard_set_text(Window* window, const char* text);
+
+// Image clipboard (PNG). Implemented on Linux through xclip/wl-copy/wl-paste;
+// returns false on platforms/desktops without a supported backend or when the
+// clipboard holds no PNG image.
+bool clipboard_set_image_png(Window* window, const uint8_t* png, size_t size);
+bool clipboard_get_image_png(Window* window, std::vector<uint8_t>& out);
 bool should_close(Window* window);
 void set_should_close(Window* window);
 void swap_buffers(Window* window);
@@ -75,6 +82,8 @@ void get_window_size(Window* window, int* w, int* h);
 void get_cursor(Window* window, double* x, double* y);
 bool mouse_down(Window* window);
 bool mouse_right_down(Window* window);
+// True while the middle mouse button is held (used for canvas panning).
+bool mouse_middle_down(Window* window);
 // Returns the accumulated scroll-wheel delta since the last call and resets it.
 double scroll_poll(Window* window);
 bool key_pressed(Window* window, Key key);
@@ -83,6 +92,13 @@ bool key_raw_down(Window* window, int glfw_key);
 
 void minimize(Window* window);
 void toggle_maximize(Window* window);
+// Starts a native drag of the PNG image in `png`. Blocks until the drag ends,
+// so call it from the UI thread and let the OS own the interaction. Used to
+// drag the canvas result out to file managers and browsers without saving it
+// first. Returns true when a target accepted the drop; false when the platform
+// has no drag-out backend or nothing accepted. Best-effort on X11 (XDND
+// text/uri-list pointing at a temporary file).
+bool drag_source_file(Window* window, const uint8_t* png, size_t size);
 void drag_update(Window* window, bool active);
 void drag_stop(Window* window);
 void resize_update(Window* window, bool active);

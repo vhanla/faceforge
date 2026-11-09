@@ -8,6 +8,7 @@
 #elif defined(__linux__) && defined(AMUIE_HAVE_X11)
 #define GLFW_EXPOSE_NATIVE_X11
 #include <X11/Xatom.h>
+#include <X11/Xutil.h>
 #endif
 
 #include <GLFW/glfw3.h>
@@ -18,6 +19,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+
+#if defined(__linux__)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace platform {
 
@@ -273,6 +279,10 @@ bool mouse_down(Window* window) {
 
 bool mouse_right_down(Window* window) {
     return window && glfwGetMouseButton(window->handle, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+}
+
+bool mouse_middle_down(Window* window) {
+    return window && glfwGetMouseButton(window->handle, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
 }
 
 double scroll_poll(Window* window) {
@@ -550,6 +560,283 @@ std::string save_file_dialog(const char* title, const char* filter,
     return win_dialog(true, title, filter, initial_path, default_name);
 #else
     return unix_dialog(true, title, filter, initial_path, default_name);
+#endif
+}
+
+// ---- Image clipboard -------------------------------------------------------
+// GLFW only handles text; image copy/paste goes through the desktop tools on
+// Linux (xclip on X11, wl-copy/wl-paste on Wayland) using a temporary PNG file.
+// Other platforms report failure so the app can show a hint.
+
+bool clipboard_set_image_png(Window* /*window*/, const uint8_t* png, size_t size) {
+#if defined(__linux__)
+    if (!png || size == 0) return false;
+    char tmpl[] = "/tmp/faceforge-clip-XXXXXX";
+    const int fd = mkstemp(tmpl);
+    if (fd < 0) return false;
+    size_t off = 0;
+    while (off < size) {
+        const ssize_t n = write(fd, png + off, size - off);
+        if (n <= 0) { close(fd); unlink(tmpl); return false; }
+        off += static_cast<size_t>(n);
+    }
+    close(fd);
+    bool ok = false;
+    if (std::getenv("WAYLAND_DISPLAY") && have_cmd("wl-copy")) {
+        ok = std::system((std::string("wl-copy --type image/png < ") + shq(tmpl)).c_str()) == 0;
+    } else if (have_cmd("xclip")) {
+        ok = std::system((std::string("xclip -selection clipboard -t image/png -i ") + shq(tmpl)).c_str()) == 0;
+    }
+    unlink(tmpl);
+    return ok;
+#else
+    (void)png;
+    (void)size;
+    return false;
+#endif
+}
+
+bool clipboard_get_image_png(Window* /*window*/, std::vector<uint8_t>& out) {
+#if defined(__linux__)
+    out.clear();
+    char tmpl[] = "/tmp/faceforge-paste-XXXXXX";
+    const int fd = mkstemp(tmpl);
+    if (fd < 0) return false;
+    close(fd);
+    bool ok = false;
+    const std::string redir = " > " + shq(tmpl) + " 2>/dev/null";
+    if (std::getenv("WAYLAND_DISPLAY") && have_cmd("wl-paste")) {
+        ok = std::system(("wl-paste --type image/png --no-newline" + redir).c_str()) == 0;
+    } else if (have_cmd("xclip")) {
+        ok = std::system(("xclip -selection clipboard -t image/png -o" + redir).c_str()) == 0;
+    }
+    if (ok) {
+        FILE* f = std::fopen(tmpl, "rb");
+        if (f) {
+            std::fseek(f, 0, SEEK_END);
+            const long n = std::ftell(f);
+            std::fseek(f, 0, SEEK_SET);
+            if (n > 0) {
+                out.resize(static_cast<size_t>(n));
+                const size_t got = std::fread(out.data(), 1, out.size(), f);
+                out.resize(got);
+            }
+            std::fclose(f);
+        }
+    }
+    unlink(tmpl);
+    return ok && !out.empty();
+#else
+    (void)out;
+    return false;
+#endif
+}
+
+// ---- Drag-out (X11 XDND source) -------------------------------------------
+// Dragging out of the canvas with GLFW's event pump is awkward, so the drag
+// runs on a *separate* X11 connection and a hidden source window: it owns
+// XdndSelection, offers the result as a file (text/uri-list) and blocks until
+// the button is released. File managers and browsers accept that type, so the
+// result can be dropped without saving it first. Windows and other backends
+// return false (the app falls back to the clipboard).
+
+bool drag_source_file(Window* window, const uint8_t* png, size_t size) {
+#if defined(__linux__) && defined(AMUIE_HAVE_X11)
+    if (!window || !window->handle || !png || size == 0) return false;
+    // Materialise the PNG so the drag can offer it as a real file (text/uri-list).
+    char tmpl[] = "/tmp/faceforge-drag-XXXXXX";
+    const int fd = mkstemp(tmpl);
+    if (fd < 0) return false;
+    size_t off = 0;
+    while (off < size) {
+        const ssize_t n = write(fd, png + off, size - off);
+        if (n <= 0) { close(fd); unlink(tmpl); return false; }
+        off += static_cast<size_t>(n);
+    }
+    close(fd);
+    const std::string path = tmpl;
+
+    Display* dpy = XOpenDisplay(nullptr);
+    if (!dpy) { unlink(tmpl); return false; }
+    // Xlib aborts the process on BadWindow, which is easy to hit here because
+    // drag targets can vanish mid-drag. Ignore X errors for the drag and
+    // restore the previous handler afterwards.
+    XErrorHandler old_handler = XSetErrorHandler(+[](Display*, XErrorEvent*) { return 0; });
+    const int screen = DefaultScreen(dpy);
+    const ::Window root = RootWindow(dpy, screen);
+    const ::Window src = XCreateSimpleWindow(dpy, root, 0, 0, 1, 1, 0, 0, 0);
+    // GLFW marks the app window XdndAware to accept drops. Never target it:
+    // GLFW would answer asynchronously after this source window is gone.
+    const ::Window self = glfwGetX11Window(window->handle);
+
+    const Atom a_aware = XInternAtom(dpy, "XdndAware", False);
+    const Atom a_sel = XInternAtom(dpy, "XdndSelection", False);
+    const Atom a_enter = XInternAtom(dpy, "XdndEnter", False);
+    const Atom a_pos = XInternAtom(dpy, "XdndPosition", False);
+    const Atom a_status = XInternAtom(dpy, "XdndStatus", False);
+    const Atom a_leave = XInternAtom(dpy, "XdndLeave", False);
+    const Atom a_drop = XInternAtom(dpy, "XdndDrop", False);
+    const Atom a_finished = XInternAtom(dpy, "XdndFinished", False);
+    const Atom a_action = XInternAtom(dpy, "XdndActionCopy", False);
+    const Atom a_urilist = XInternAtom(dpy, "text/uri-list", False);
+    const Atom a_utf8 = XInternAtom(dpy, "UTF8_STRING", False);
+
+    std::string uri = "file://";
+    uri += path;
+    uri += "\r\n";
+
+    XSetSelectionOwner(dpy, a_sel, src, CurrentTime);
+    XFlush(dpy);
+
+    auto has_aware = [&](::Window w) -> bool {
+        Atom type = None;
+        int fmt = 0;
+        unsigned long n = 0, after = 0;
+        unsigned char* data = nullptr;
+        const bool ok = XGetWindowProperty(dpy, w, a_aware, 0, 1, False, AnyPropertyType,
+                                           &type, &fmt, &n, &after, &data) == Success &&
+                        data != nullptr;
+        if (data) XFree(data);
+        return ok;
+    };
+
+    // Deepest window under the pointer, plus root coordinates and button mask.
+    auto pick = [&](int* rx, int* ry, unsigned int* mask) -> ::Window {
+        ::Window cur = root;
+        ::Window child = None;
+        int x = 0, y = 0, wx = 0, wy = 0;
+        unsigned int m = 0;
+        for (;;) {
+            ::Window rr = None;
+            if (!XQueryPointer(dpy, cur, &rr, &child, &x, &y, &wx, &wy, &m)) return None;
+            *rx = x;
+            *ry = y;
+            *mask = m;
+            if (child == None) break;
+            cur = child;
+        }
+        return cur;
+    };
+
+    auto send = [&](::Window target, Atom type, long l0, long l1, long l2, long l3, long l4) {
+        XEvent ev;
+        std::memset(&ev, 0, sizeof(ev));
+        ev.xclient.type = ClientMessage;
+        ev.xclient.display = dpy;
+        ev.xclient.window = target;
+        ev.xclient.message_type = type;
+        ev.xclient.format = 32;
+        ev.xclient.data.l[0] = l0;
+        ev.xclient.data.l[1] = l1;
+        ev.xclient.data.l[2] = l2;
+        ev.xclient.data.l[3] = l3;
+        ev.xclient.data.l[4] = l4;
+        XSendEvent(dpy, target, False, NoEventMask, &ev);
+        XFlush(dpy);
+    };
+
+    bool accepted = false;
+    bool finished = false;
+    auto pump = [&]() {
+        while (XPending(dpy) > 0) {
+            XEvent e;
+            XNextEvent(dpy, &e);
+            if (e.type == ClientMessage && e.xclient.message_type == a_status &&
+                e.xclient.data.l[0] == static_cast<long>(src)) {
+                accepted = (e.xclient.data.l[1] & 1) != 0;
+            } else if (e.type == ClientMessage && e.xclient.message_type == a_finished &&
+                       e.xclient.data.l[0] == static_cast<long>(src)) {
+                finished = true;
+            } else if (e.type == SelectionRequest) {
+                XSelectionRequestEvent* r = &e.xselectionrequest;
+                XSelectionEvent se;
+                std::memset(&se, 0, sizeof(se));
+                se.type = SelectionNotify;
+                se.display = dpy;
+                se.requestor = r->requestor;
+                se.selection = r->selection;
+                se.target = r->target;
+                se.time = r->time;
+                se.property = None;
+                if (r->target == a_urilist || r->target == a_utf8 || r->target == XA_STRING) {
+                    const Atom prop = r->property != None ? r->property : a_urilist;
+                    XChangeProperty(dpy, r->requestor, prop, r->target, 8, PropModeReplace,
+                                    reinterpret_cast<const unsigned char*>(uri.c_str()),
+                                    static_cast<int>(uri.size()));
+                    se.property = prop;
+                }
+                XSendEvent(dpy, r->requestor, False, 0, reinterpret_cast<XEvent*>(&se));
+                XFlush(dpy);
+            }
+        }
+    };
+
+    ::Window target = None;
+    int last_x = -1, last_y = -1;
+    for (int iter = 0; iter < 60000; ++iter) { // safety cap ~15 min
+        int rx = 0, ry = 0;
+        unsigned int mask = 0;
+        ::Window cur = pick(&rx, &ry, &mask);
+        ::Window cand = None;
+        if (cur != None) {
+            for (::Window w = cur; w != None && w != root; ) {
+                if (has_aware(w)) { cand = w; break; }
+                ::Window rr = None, parent = None;
+                ::Window* kids = nullptr;
+                unsigned int nkids = 0;
+                if (!XQueryTree(dpy, w, &rr, &parent, &kids, &nkids)) break;
+                if (kids) XFree(kids);
+                w = parent;
+            }
+        }
+        if (cand == self) cand = None;
+        const long pos = ((rx & 0xFFFF) << 16) | (ry & 0xFFFF);
+        if (cand != target) {
+            if (target != None) send(target, a_leave, static_cast<long>(src), 0, 0, 0, 0);
+            target = cand;
+            accepted = false;
+            if (target != None) {
+                send(target, a_enter, static_cast<long>(src), (5L << 24), static_cast<long>(a_urilist), 0, 0);
+                send(target, a_pos, static_cast<long>(src), 0, pos, CurrentTime, static_cast<long>(a_action));
+            }
+        } else if (target != None && (rx != last_x || ry != last_y)) {
+            send(target, a_pos, static_cast<long>(src), 0, pos, CurrentTime, static_cast<long>(a_action));
+        }
+        last_x = rx;
+        last_y = ry;
+        pump();
+
+        if ((mask & Button1Mask) == 0) break;
+        usleep(12000);
+    }
+
+    bool dropped = false;
+    if (target != None && accepted) {
+        send(target, a_drop, static_cast<long>(src), 0, CurrentTime, 0, 0);
+        for (int i = 0; i < 200 && !finished; ++i) { // up to ~2 s to serve the selection
+            pump();
+            usleep(10000);
+        }
+        dropped = true;
+    } else if (target != None) {
+        send(target, a_leave, static_cast<long>(src), 0, 0, 0, 0);
+    }
+
+    XDestroyWindow(dpy, src);
+    // Drain any pending X errors (BadWindow from targets that vanished mid-drag)
+    // while the ignore handler is still installed.
+    XSync(dpy, False);
+    XCloseDisplay(dpy);
+    XSetErrorHandler(old_handler);
+    // The target has acknowledged the transfer by now, so the temp file is safe
+    // to remove.
+    unlink(tmpl);
+    return dropped;
+#else
+    (void)window;
+    (void)png;
+    (void)size;
+    return false;
 #endif
 }
 
