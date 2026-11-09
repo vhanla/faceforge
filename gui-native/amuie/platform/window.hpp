@@ -61,15 +61,21 @@ int poll_chars(Window* window, uint32_t* out, int max);
 // Dropped file paths since the last call; owned by the platform and valid until
 // the next poll_events.
 int poll_drops(Window* window, const char** out, int max);
+// Dropped image payloads (raw file bytes, usually PNG/JPEG) received through
+// XDND when the source offered an image type rather than a file path. Appends
+// to `out` and clears the queue; returns how many images were appended.
+int poll_image_drops(Window* window, std::vector<std::vector<uint8_t>>& out);
 
 // Clipboard text. The pointer from clipboard_get_text is owned by GLFW and
 // valid until the next clipboard call or window destruction.
 const char* clipboard_get_text(Window* window);
 void clipboard_set_text(Window* window, const char* text);
 
-// Image clipboard (PNG). Implemented on Linux through xclip/wl-copy/wl-paste;
-// returns false on platforms/desktops without a supported backend or when the
-// clipboard holds no PNG image.
+// Image clipboard (PNG). On X11 the clipboard is read natively (TARGETS
+// enumeration plus INCR transfers, which handles browser clipboards); on
+// Wayland or when that fails it falls back to xclip/wl-paste. Returns false on
+// platforms/desktops without a supported backend or when the clipboard holds
+// no image.
 bool clipboard_set_image_png(Window* window, const uint8_t* png, size_t size);
 bool clipboard_get_image_png(Window* window, std::vector<uint8_t>& out);
 bool should_close(Window* window);

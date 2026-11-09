@@ -660,6 +660,28 @@ int main(int argc, char** argv) {
             }
         }
 
+        // XDND image drops (browser drags carry image bytes instead of a local
+        // path): decode them like a clipboard paste.
+        std::vector<std::vector<uint8_t>> image_drops;
+        if (platform::poll_image_drops(window, image_drops) > 0 && !app->busy()) {
+            for (auto& bytes : image_drops) {
+                if (bytes.empty()) continue;
+                std::string err;
+                ff::Image img =
+                    ff::Image::decode(bytes.data(), static_cast<int32_t>(bytes.size()), &err);
+                if (!img.valid()) {
+                    app->setStatus("Cannot decode dropped image", true);
+                    continue;
+                }
+                if (state->mode == AppMode::Photo && !app->base.valid()) {
+                    app->openTargetImage(std::move(img), "");
+                    state->sync_output_path = true;
+                } else {
+                    app->addIdentityImage(std::move(img), "dropped");
+                }
+            }
+        }
+
         // Advance the workers and publish anything they finished this frame.
         app->poll();
         video->poll();

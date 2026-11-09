@@ -43,6 +43,7 @@ struct Window {
     static constexpr int kQueueCap = 64;
     static constexpr int kMaxDrops = 8;
     static constexpr int kDropPathLen = 512;
+    static constexpr int kMaxImageDrops = 4;
     KeyEvent key_queue[kQueueCap] = {};
     int key_count = 0;
     uint32_t char_queue[kQueueCap] = {};
@@ -50,7 +51,16 @@ struct Window {
     char drop_buf[kMaxDrops][kDropPathLen] = {};
     const char* drop_ptrs[kMaxDrops] = {};
     int drop_count = 0;
+    // Dropped images (raw file bytes, usually PNG/JPEG) received via XDND when
+    // the source offers an image target instead of a file path.
+    std::vector<std::vector<uint8_t>> image_drops;
 };
+
+namespace {
+// Set by create(); the frame pump needs the window for XDND drops.
+Window* g_main_window = nullptr;
+void xdnd_pump(Window* window);
+}  // namespace
 
 namespace {
 
@@ -215,11 +225,13 @@ Window* create(const WindowDesc& desc) {
     glfwSetKeyCallback(handle, on_key);
     glfwSetCharCallback(handle, on_char);
     glfwSetDropCallback(handle, on_drop);
+    g_main_window = w;
     return w;
 }
 
 void destroy(Window* window) {
     if (!window) return;
+    if (g_main_window == window) g_main_window = nullptr;
     if (window->cursor_arrow) glfwDestroyCursor(window->cursor_arrow);
     if (window->cursor_resize) glfwDestroyCursor(window->cursor_resize);
     if (window->handle) {
@@ -252,7 +264,13 @@ bool framebuffer_transparent(Window* window) {
     return glfwGetWindowAttrib(window->handle, GLFW_TRANSPARENT_FRAMEBUFFER) != 0;
 }
 
-void poll_events() { glfwPollEvents(); }
+void poll_events() {
+    // Run our own XDND target before GLFW drains the queue: GLFW only accepts
+    // text/uri-list file drops, so browser image drags (which expose image/png
+    // plus a blob: uri-list) would otherwise be lost.
+    if (g_main_window) xdnd_pump(g_main_window);
+    glfwPollEvents();
+}
 bool should_close(Window* window) { return window && glfwWindowShouldClose(window->handle); }
 void set_should_close(Window* window) { if (window) glfwSetWindowShouldClose(window->handle, GLFW_TRUE); }
 void swap_buffers(Window* window) { if (window) glfwSwapBuffers(window->handle); }
@@ -328,6 +346,14 @@ int poll_drops(Window* window, const char** out, int max) {
         window->drop_ptrs[i - n] = window->drop_ptrs[i];
     }
     window->drop_count -= n;
+    return n;
+}
+
+int poll_image_drops(Window* window, std::vector<std::vector<uint8_t>>& out) {
+    if (!window) return 0;
+    const int n = static_cast<int>(window->image_drops.size());
+    for (auto& img : window->image_drops) out.push_back(std::move(img));
+    window->image_drops.clear();
     return n;
 }
 
@@ -563,10 +589,343 @@ std::string save_file_dialog(const char* title, const char* filter,
 #endif
 }
 
+// ---- X11 selection helpers ------------------------------------------------
+// Shared by the image clipboard and the XDND drop target. The clipboard uses a
+// dedicated connection so GLFW keeps owning the main event queue; XDND runs on
+// the GLFW connection because drops are addressed to the GLFW window.
+
+#if defined(__linux__) && defined(AMUIE_HAVE_X11)
+namespace {
+
+struct X11Clipboard {
+    Display* dpy = nullptr;
+    ::Window win = None;
+    Atom sel = None;
+    Atom incr = None;
+    Atom targets = None;
+    Atom image_png = None;
+    Atom image_jpeg = None;
+    Atom image_gif = None;
+    Atom image_bmp = None;
+};
+X11Clipboard g_clip;
+
+bool x11_clip_init() {
+    if (g_clip.dpy) return true;
+    Display* d = XOpenDisplay(nullptr);
+    if (!d) return false;
+    const int scr = DefaultScreen(d);
+    ::Window w = XCreateSimpleWindow(d, RootWindow(d, scr), 0, 0, 1, 1, 0, 0, 0);
+    if (!w) { XCloseDisplay(d); return false; }
+    // Needed to receive INCR PropertyNotify chunks.
+    XSelectInput(d, w, PropertyChangeMask);
+    auto A = [&](const char* n) { return XInternAtom(d, n, False); };
+    g_clip.dpy = d;
+    g_clip.win = w;
+    g_clip.sel = A("CLIPBOARD");
+    g_clip.incr = A("INCR");
+    g_clip.targets = A("TARGETS");
+    g_clip.image_png = A("image/png");
+    g_clip.image_jpeg = A("image/jpeg");
+    g_clip.image_gif = A("image/gif");
+    g_clip.image_bmp = A("image/bmp");
+    return true;
+}
+
+size_t x11_prop_bytes(int fmt, unsigned long n) {
+    // Xlib returns 32-bit format data as an array of `long`, so on LP64 each
+    // item is 8 bytes wide, not 4.
+    if (fmt == 32) return static_cast<size_t>(n) * sizeof(long);
+    if (fmt == 16) return static_cast<size_t>(n) * 2u;
+    return static_cast<size_t>(n);
+}
+
+// Reads a property off `win`, following the INCR protocol for large transfers.
+// `incr` is the INCR atom for the connection that owns the window.
+bool x11_prop_to_bytes(Display* dpy, ::Window win, Atom prop, Atom incr,
+                       std::vector<uint8_t>& out, int timeout_ms) {
+    Atom type = None;
+    int fmt = 0;
+    unsigned long n = 0, after = 0;
+    unsigned char* data = nullptr;
+    if (XGetWindowProperty(dpy, win, prop, 0, 0x1fffffff, False, AnyPropertyType,
+                           &type, &fmt, &n, &after, &data) != Success)
+        return false;
+    if (type == incr) {
+        if (data) XFree(data);
+        // Deleting the property acknowledges and starts the chunk stream.
+        XDeleteProperty(dpy, win, prop);
+        XFlush(dpy);
+        for (int i = 0; i < timeout_ms / 5; ++i) {
+            XEvent ev;
+            if (!XCheckIfEvent(dpy, &ev,
+                    +[](Display*, XEvent* e, XPointer a) -> Bool {
+                        return e->type == PropertyNotify &&
+                               e->xproperty.state == PropertyNewValue &&
+                               e->xproperty.atom == *reinterpret_cast<Atom*>(a);
+                    }, reinterpret_cast<XPointer>(&prop))) {
+                XFlush(dpy);
+                usleep(5000);
+                continue;
+            }
+            Atom t2 = None;
+            int f2 = 0;
+            unsigned long n2 = 0, a2 = 0;
+            unsigned char* d2 = nullptr;
+            if (XGetWindowProperty(dpy, win, prop, 0, 0x1fffffff, True,
+                                   AnyPropertyType, &t2, &f2, &n2, &a2, &d2) != Success)
+                break;
+            if (n2 == 0) {
+                if (d2) XFree(d2);
+                // The selection owner also generates a PropertyNotify when it
+                // first advertises INCR; that stale event can be seen before any
+                // chunk arrives. Only a zero-length property after some data
+                // marks the end of the stream.
+                if (!out.empty()) return true;
+                continue;
+            }
+            if (d2) {
+                out.insert(out.end(), d2, d2 + x11_prop_bytes(f2, n2));
+                XFree(d2);
+            }
+        }
+        return !out.empty();
+    }
+    if (data) {
+        const size_t bytes = x11_prop_bytes(fmt, n);
+        if (bytes) out.assign(data, data + bytes);
+        XFree(data);
+    }
+    XDeleteProperty(dpy, win, prop);
+    return !out.empty();
+}
+
+// Requests `target` on `sel` and waits for the matching SelectionNotify.
+// XDND sources may reject CurrentTime, so callers pass the drop timestamp.
+bool x11_read_selection(Display* dpy, ::Window requestor, Atom sel, Atom target,
+                        Atom incr, std::vector<uint8_t>& out, int timeout_ms,
+                        Time time) {
+    out.clear();
+    Atom prop = XInternAtom(dpy, "FACEFF_RECV", False);
+    XDeleteProperty(dpy, requestor, prop);
+    XConvertSelection(dpy, sel, target, prop, requestor, time);
+    XFlush(dpy);
+    struct Req { Atom sel; Atom target; ::Window req; };
+    Req req{sel, target, requestor};
+    Atom got_prop = None;
+    XEvent ev;
+    for (int i = 0; i < timeout_ms / 5; ++i) {
+        if (XCheckIfEvent(dpy, &ev,
+                +[](Display*, XEvent* e, XPointer a) -> Bool {
+                    Req* r = reinterpret_cast<Req*>(a);
+                    return e->type == SelectionNotify &&
+                           e->xselection.selection == r->sel &&
+                           e->xselection.target == r->target &&
+                           e->xselection.requestor == r->req;
+                }, reinterpret_cast<XPointer>(&req))) {
+            got_prop = ev.xselection.property;
+            break;
+        }
+        XFlush(dpy);
+        usleep(5000);
+    }
+    if (got_prop == None || got_prop == 0) return false;
+    return x11_prop_to_bytes(dpy, requestor, got_prop, incr, out, timeout_ms);
+}
+
+// Reads an image off the X11 clipboard by first enumerating TARGETS and then
+// requesting the best available image type. Returns false when the clipboard
+// holds no image.
+bool x11_clip_read_image(std::vector<uint8_t>& out) {
+    if (!x11_clip_init()) return false;
+    if (XGetSelectionOwner(g_clip.dpy, g_clip.sel) == None) return false;
+    std::vector<uint8_t> targets;
+    if (!x11_read_selection(g_clip.dpy, g_clip.win, g_clip.sel, g_clip.targets,
+                            g_clip.incr, targets, 4000, CurrentTime))
+        return false;
+    const Atom* atoms = reinterpret_cast<const Atom*>(targets.data());
+    const size_t count = targets.size() / sizeof(Atom);
+    const Atom prefer[4] = {g_clip.image_png, g_clip.image_jpeg, g_clip.image_gif,
+                            g_clip.image_bmp};
+    for (Atom want : prefer) {
+        bool available = false;
+        for (size_t i = 0; i < count; ++i) {
+            if (atoms[i] == want) { available = true; break; }
+        }
+        if (!available) continue;
+        if (x11_read_selection(g_clip.dpy, g_clip.win, g_clip.sel, want, g_clip.incr,
+                               out, 20000, CurrentTime) && !out.empty())
+            return true;
+        out.clear();
+    }
+    return false;
+}
+
+// Minimal percent-decode for file:// URIs. Returns empty on a URL that is not a
+// local path.
+std::string x11_uri_to_path(const std::string& uri) {
+    std::string s = uri;
+    while (!s.empty() && (s.back() == '\r' || s.back() == '\n')) s.pop_back();
+    if (s.rfind("file://", 0) != 0) return {};
+    std::string path = s.substr(7);
+    const size_t slash = path.find('/');
+    if (slash != std::string::npos) path = path.substr(slash);
+    std::string decoded;
+    for (size_t i = 0; i < path.size(); ++i) {
+        if (path[i] == '%' && i + 2 < path.size()) {
+            auto hex = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            const int hi = hex(path[i + 1]);
+            const int lo = hex(path[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                decoded.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        decoded.push_back(path[i]);
+    }
+    return decoded;
+}
+
+}  // namespace
+#endif  // __linux__ && AMUIE_HAVE_X11
+
+// ---- XDND drop target ------------------------------------------------------
+// GLFW's XDND receiver only accepts text/uri-list paths, so browser drags whose
+// payload is an image (Firefox offers image/png for native images) are dropped
+// on the floor. This pump runs before glfwPollEvents and answers XdndDrop
+// itself: it asks the source for TARGETS, reads the first image type it offers
+// (or a local file URI list) and stores the bytes for the main loop.
+
+namespace {
+
+void xdnd_pump(Window* window) {
+#if defined(__linux__) && defined(AMUIE_HAVE_X11)
+    if (!window || !window->handle) return;
+    Display* dpy = glfwGetX11Display();
+    ::Window self = glfwGetX11Window(window->handle);
+    if (!dpy || self == None) return;
+
+    const Atom a_drop = XInternAtom(dpy, "XdndDrop", False);
+    struct Want { ::Window win; Atom drop; };
+    Want want{self, a_drop};
+    XEvent ev;
+    while (XCheckIfEvent(dpy, &ev,
+            +[](Display*, XEvent* e, XPointer p) -> Bool {
+                Want* w = reinterpret_cast<Want*>(p);
+                return e->type == ClientMessage &&
+                       e->xclient.message_type == w->drop &&
+                       e->xclient.window == w->win;
+            }, reinterpret_cast<XPointer>(&want))) {
+        const ::Window src = static_cast<::Window>(ev.xclient.data.l[0]);
+        const Time drop_time = static_cast<Time>(ev.xclient.data.l[2]);
+        if (src == None) continue;
+
+        const Atom a_sel = XInternAtom(dpy, "XdndSelection", False);
+        const Atom a_incr = XInternAtom(dpy, "INCR", False);
+        const Atom a_targets = XInternAtom(dpy, "TARGETS", False);
+        const Atom a_urilist = XInternAtom(dpy, "text/uri-list", False);
+        const Atom a_images[4] = {
+            XInternAtom(dpy, "image/png", False),
+            XInternAtom(dpy, "image/jpeg", False),
+            XInternAtom(dpy, "image/gif", False),
+            XInternAtom(dpy, "image/bmp", False),
+        };
+
+        std::vector<uint8_t> targets;
+        const bool have_targets =
+            x11_read_selection(dpy, self, a_sel, a_targets, a_incr, targets, 2000,
+                               drop_time) &&
+            targets.size() >= sizeof(Atom);
+        const Atom* offered = reinterpret_cast<const Atom*>(targets.data());
+        const size_t offered_count = targets.size() / sizeof(Atom);
+        auto offers = [&](Atom a) {
+            for (size_t i = 0; i < offered_count; ++i) {
+                if (offered[i] == a) return true;
+            }
+            return false;
+        };
+
+        bool handled = false;
+        if (have_targets) {
+            for (Atom want : a_images) {
+                if (!offers(want)) continue;
+                std::vector<uint8_t> data;
+                if (x11_read_selection(dpy, self, a_sel, want, a_incr, data, 20000,
+                                       drop_time) &&
+                    !data.empty()) {
+                    if (static_cast<int>(window->image_drops.size()) < Window::kMaxImageDrops)
+                        window->image_drops.push_back(std::move(data));
+                    handled = true;
+                    break;
+                }
+            }
+        }
+
+        if (!handled) {
+            // Fall back to a local file URI list. Sources without TARGETS are
+            // asked directly; file managers expose text/uri-list.
+            std::vector<uint8_t> data;
+            const int timeout = have_targets || offers(a_urilist) ? 4000 : 8000;
+            if (x11_read_selection(dpy, self, a_sel, a_urilist, a_incr, data, timeout,
+                                   drop_time) &&
+                !data.empty()) {
+                const std::string list(reinterpret_cast<const char*>(data.data()),
+                                       data.size());
+                size_t pos = 0;
+                while (pos < list.size()) {
+                    size_t end = list.find_first_of("\r\n", pos);
+                    if (end == std::string::npos) end = list.size();
+                    const std::string line = list.substr(pos, end - pos);
+                    pos = end + 1;
+                    if (line.empty() || line[0] == '#') continue;
+                    const std::string path = x11_uri_to_path(line);
+                    if (path.empty()) continue;
+                    if (window->drop_count >= Window::kMaxDrops) break;
+                    const size_t n =
+                        std::min(path.size(), sizeof(window->drop_buf[0]) - 1);
+                    std::memcpy(window->drop_buf[window->drop_count], path.data(), n);
+                    window->drop_buf[window->drop_count][n] = '\0';
+                    window->drop_ptrs[window->drop_count] =
+                        window->drop_buf[window->drop_count];
+                    ++window->drop_count;
+                    handled = true;
+                }
+            }
+        }
+
+        // XdndFinished: target window, handled flag, action.
+        XEvent reply;
+        std::memset(&reply, 0, sizeof(reply));
+        reply.xclient.type = ClientMessage;
+        reply.xclient.display = dpy;
+        reply.xclient.window = src;
+        reply.xclient.message_type = XInternAtom(dpy, "XdndFinished", False);
+        reply.xclient.format = 32;
+        reply.xclient.data.l[0] = static_cast<long>(self);
+        reply.xclient.data.l[1] = handled ? 1 : 0;
+        reply.xclient.data.l[2] =
+            handled ? static_cast<long>(XInternAtom(dpy, "XdndActionCopy", False)) : 0;
+        XSendEvent(dpy, src, False, NoEventMask, &reply);
+        XFlush(dpy);
+    }
+#else
+    (void)window;
+#endif
+}
+
+}  // namespace
+
 // ---- Image clipboard -------------------------------------------------------
-// GLFW only handles text; image copy/paste goes through the desktop tools on
-// Linux (xclip on X11, wl-copy/wl-paste on Wayland) using a temporary PNG file.
-// Other platforms report failure so the app can show a hint.
+// GLFW only handles text. On Linux, paste reads the X11 selection natively
+// (TARGETS + INCR) and falls back to xclip/wl-paste through a temporary file;
+// copy goes through wl-copy/xclip. Other platforms report failure so the app
+// can show a hint.
 
 bool clipboard_set_image_png(Window* /*window*/, const uint8_t* png, size_t size) {
 #if defined(__linux__)
@@ -599,16 +958,29 @@ bool clipboard_set_image_png(Window* /*window*/, const uint8_t* png, size_t size
 bool clipboard_get_image_png(Window* /*window*/, std::vector<uint8_t>& out) {
 #if defined(__linux__)
     out.clear();
+#if defined(AMUIE_HAVE_X11)
+    // Prefer a direct X11 read: it enumerates TARGETS and follows INCR, which
+    // covers browser clipboards that only expose image/png lazily or under a
+    // non-PNG image type.
+    if (std::getenv("DISPLAY") && x11_clip_read_image(out) && !out.empty()) return true;
+    out.clear();
+#endif
     char tmpl[] = "/tmp/faceforge-paste-XXXXXX";
     const int fd = mkstemp(tmpl);
     if (fd < 0) return false;
     close(fd);
-    bool ok = false;
     const std::string redir = " > " + shq(tmpl) + " 2>/dev/null";
-    if (std::getenv("WAYLAND_DISPLAY") && have_cmd("wl-paste")) {
-        ok = std::system(("wl-paste --type image/png --no-newline" + redir).c_str()) == 0;
-    } else if (have_cmd("xclip")) {
-        ok = std::system(("xclip -selection clipboard -t image/png -o" + redir).c_str()) == 0;
+    const char* kTargets[] = {"image/png", "image/jpeg", "image/gif", "image/bmp"};
+    bool ok = false;
+    for (const char* target : kTargets) {
+        if (std::getenv("WAYLAND_DISPLAY") && have_cmd("wl-paste")) {
+            ok = std::system((std::string("wl-paste --type ") + target + " --no-newline" +
+                              redir).c_str()) == 0;
+        } else if (have_cmd("xclip")) {
+            ok = std::system((std::string("xclip -selection clipboard -t ") + target + " -o" +
+                              redir).c_str()) == 0;
+        }
+        if (ok) break;
     }
     if (ok) {
         FILE* f = std::fopen(tmpl, "rb");
@@ -680,6 +1052,7 @@ bool drag_source_file(Window* window, const uint8_t* png, size_t size) {
     const Atom a_action = XInternAtom(dpy, "XdndActionCopy", False);
     const Atom a_urilist = XInternAtom(dpy, "text/uri-list", False);
     const Atom a_utf8 = XInternAtom(dpy, "UTF8_STRING", False);
+    const Atom a_targets = XInternAtom(dpy, "TARGETS", False);
 
     std::string uri = "file://";
     uri += path;
@@ -742,10 +1115,10 @@ bool drag_source_file(Window* window, const uint8_t* png, size_t size) {
             XEvent e;
             XNextEvent(dpy, &e);
             if (e.type == ClientMessage && e.xclient.message_type == a_status &&
-                e.xclient.data.l[0] == static_cast<long>(src)) {
+                e.xclient.window == src) {
                 accepted = (e.xclient.data.l[1] & 1) != 0;
             } else if (e.type == ClientMessage && e.xclient.message_type == a_finished &&
-                       e.xclient.data.l[0] == static_cast<long>(src)) {
+                       e.xclient.window == src) {
                 finished = true;
             } else if (e.type == SelectionRequest) {
                 XSelectionRequestEvent* r = &e.xselectionrequest;
@@ -758,7 +1131,13 @@ bool drag_source_file(Window* window, const uint8_t* png, size_t size) {
                 se.target = r->target;
                 se.time = r->time;
                 se.property = None;
-                if (r->target == a_urilist || r->target == a_utf8 || r->target == XA_STRING) {
+                if (r->target == a_targets) {
+                    const Atom offered[3] = {a_urilist, a_utf8, XA_STRING};
+                    const Atom prop = r->property != None ? r->property : a_targets;
+                    XChangeProperty(dpy, r->requestor, prop, XA_ATOM, 32, PropModeReplace,
+                                    reinterpret_cast<const unsigned char*>(offered), 3);
+                    se.property = prop;
+                } else if (r->target == a_urilist || r->target == a_utf8 || r->target == XA_STRING) {
                     const Atom prop = r->property != None ? r->property : a_urilist;
                     XChangeProperty(dpy, r->requestor, prop, r->target, 8, PropModeReplace,
                                     reinterpret_cast<const unsigned char*>(uri.c_str()),
