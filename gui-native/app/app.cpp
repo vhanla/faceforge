@@ -178,6 +178,23 @@ void App::openTarget(const std::string& path) {
     setStatus(buf, false);
 }
 
+void App::openTargetImage(ff::Image&& img, const std::string& label) {
+    if (busy()) return;
+    if (!img.valid()) {
+        setStatus("Cannot load target image", true);
+        return;
+    }
+    const int w = img.width;
+    const int h = img.height;
+    target_path.clear();
+    replaceBase(std::move(img));
+    defaultSavePathFor(label.empty() ? "pasted.png" : label);
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), "Loaded target - %dx%d - %s", w, h,
+                  label.empty() ? "pasted image" : label.c_str());
+    setStatus(buf, false);
+}
+
 void App::addIdentityFile(const std::string& path) {
     std::string err;
     ff::Image img = ff::Image::load(path.c_str(), &err);
@@ -845,11 +862,19 @@ void App::copyNow() {
     }
     clipboard_png.clear();
     if (shown->encodePng(clipboard_png)) {
+        clipboard_gen++;
         setStatus("Copied to clipboard", false);
     } else {
         clipboard_png.clear();
         setStatus("Could not encode image", true);
     }
+}
+
+bool App::encodeDisplayPng(std::vector<uint8_t>& out) {
+    const ff::Image* shown = displayImage();
+    if (!shown || !shown->valid()) return false;
+    out.clear();
+    return shown->encodePng(out);
 }
 
 void App::defaultSavePathFor(const std::string& input) {

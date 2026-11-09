@@ -551,10 +551,22 @@ int main(int argc, char** argv) {
     bool prev_end_down = false;
     bool prev_i_down = false;
     bool prev_o_down = false;
+    bool prev_c_down = false;
+    bool prev_v_down = false;
     double prev_time = platform::time_seconds();
     double ui_ms_total = 0.0;
     int ui_frames = 0;
     int frame = 0;
+
+    // Clipboard handoff: remember the generation last pushed to the OS so copy
+    // requests are forwarded exactly once.
+    uint32_t clipboard_gen_seen = app->clipboard_gen;
+
+    // Canvas drag-out state: armed on a left press inside the published result
+    // rectangle and started once the pointer moves past a small threshold.
+    bool drag_out_armed = false;
+    float drag_out_x = 0.0f;
+    float drag_out_y = 0.0f;
 
     while (!platform::should_close(window)) {
         platform::poll_events();
@@ -593,6 +605,20 @@ int main(int argc, char** argv) {
         const bool end_hit = edge(GLFW_KEY_END, prev_end_down);
         const bool i_hit = edge(GLFW_KEY_I, prev_i_down);
         const bool o_hit = edge(GLFW_KEY_O, prev_o_down);
+
+        // Clipboard shortcuts (only when no text field owns the keyboard):
+        // Ctrl+C copies the result image, Ctrl+V requests an image paste.
+        const bool c_hit = edge(GLFW_KEY_C, prev_c_down);
+        const bool v_hit = edge(GLFW_KEY_V, prev_v_down);
+        if (ui.input.focused_id == 0 && ui.input.key_ctrl) {
+            if (c_hit && state->mode == AppMode::Photo) {
+                app->copyResult();
+            }
+            if (v_hit) {
+                state->paste_request =
+                    (state->mode == AppMode::Photo && !app->base.valid()) ? 1 : 2;
+            }
+        }
 
         if (state->mode == AppMode::Video && video->isOpen() && ui.input.focused_id == 0) {
             const int64_t step = ui.input.key_shift ? 10 : 1;
@@ -668,6 +694,8 @@ int main(int argc, char** argv) {
         const bool mouse_right_released = !mouse_right_down && prev_mouse_right_down;
         prev_mouse_right_down = mouse_right_down;
 
+        const bool mouse_middle_down = platform::mouse_middle_down(window);
+
         const double now = platform::time_seconds();
         const float dt = static_cast<float>(std::clamp(now - prev_time, 0.0, 0.05));
         prev_time = now;
@@ -685,6 +713,7 @@ int main(int argc, char** argv) {
         ui.mouse_right_down = mouse_right_down;
         ui.mouse_right_clicked = mouse_right_clicked;
         ui.mouse_right_released = mouse_right_released;
+        ui.mouse_middle_down = mouse_middle_down;
 
         ui.theme = state->acrylic
                        ? (state->light_theme ? &acrylic_light_theme() : &acrylic_dark_theme())
@@ -722,6 +751,70 @@ int main(int argc, char** argv) {
         // Text widgets may have requested a clipboard write (copy/cut).
         if (ui.input.clipboard_out) {
             platform::clipboard_set_text(window, ui.input.clipboard_out);
+        }
+
+        // Paste requests (toolbar, context menus or Ctrl+V): 1 = target image,
+        // 2 = identity image, 3 = video (unsupported).
+        if (state->paste_request != 0) {
+            const int req = state->paste_request;
+            state->paste_request = 0;
+            std::vector<uint8_t> png;
+            if (req == 3) {
+                app->setStatus("Clipboard video paste is not supported yet", true);
+            } else if (!platform::clipboard_get_image_png(window, png) || png.empty()) {
+                app->setStatus("Clipboard has no image", true);
+            } else {
+                std::string err;
+                ff::Image img = ff::Image::decode(png.data(), static_cast<int32_t>(png.size()), &err);
+                if (!img.valid()) {
+                    app->setStatus("Cannot decode clipboard image", true);
+                } else if (req == 1) {
+                    app->openTargetImage(std::move(img), "");
+                    state->sync_output_path = true;
+                } else {
+                    app->addIdentityImage(std::move(img), "pasted");
+                }
+            }
+        }
+
+        // Push the result to the OS clipboard when the app produced a new payload.
+        if (app->clipboard_gen != clipboard_gen_seen) {
+            clipboard_gen_seen = app->clipboard_gen;
+            if (!app->clipboard_png.empty()) {
+                platform::clipboard_set_image_png(window, app->clipboard_png.data(),
+                                                  app->clipboard_png.size());
+            }
+        }
+
+        // Canvas drag-out: arm on a left press inside the published result rect,
+        // then start the native drag once the pointer moves a few pixels. The
+        // call blocks until the button is released. Studio disables it via
+        // canvas_drag_ready, and it only applies in Photo mode.
+        if (mouse_clicked && state->mode == AppMode::Photo && state->canvas_drag_ready &&
+            ui.mouse_x >= state->canvas_drag_rect.x &&
+            ui.mouse_x <= state->canvas_drag_rect.x + state->canvas_drag_rect.w &&
+            ui.mouse_y >= state->canvas_drag_rect.y &&
+            ui.mouse_y <= state->canvas_drag_rect.y + state->canvas_drag_rect.h) {
+            drag_out_armed = true;
+            drag_out_x = ui.mouse_x;
+            drag_out_y = ui.mouse_y;
+        }
+        if (!mouse_down) {
+            drag_out_armed = false;
+        } else if (drag_out_armed) {
+            const float ddx = ui.mouse_x - drag_out_x;
+            const float ddy = ui.mouse_y - drag_out_y;
+            if (ddx * ddx + ddy * ddy > 36.0f) {
+                drag_out_armed = false;
+                std::vector<uint8_t> png;
+                if (app->encodeDisplayPng(png) && !png.empty()) {
+                    if (platform::drag_source_file(window, png.data(), png.size())) {
+                        app->setStatus("Result dropped", false);
+                    } else {
+                        app->setStatus("Drag-out is not available on this desktop", true);
+                    }
+                }
+            }
         }
 
         switch (state->window_action) {

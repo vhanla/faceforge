@@ -226,6 +226,9 @@ struct App {
 
     // Image clipboard payload produced by copyResult() for the platform layer.
     std::vector<uint8_t> clipboard_png;
+    // Bumped every time clipboard_png changes so the entry point knows when to
+    // hand it to the OS clipboard.
+    uint32_t clipboard_gen = 0;
 
     // ------------------------------------------------------------------
     // Public operations (call from the UI thread).
@@ -235,6 +238,9 @@ struct App {
     void markConfigDirty();
 
     void openTarget(const std::string& path);
+    // Opens a decoded in-memory image as the target (e.g. pasted from the
+    // clipboard). `label` is used for status/paths when not empty.
+    void openTargetImage(ff::Image&& img, const std::string& label);
     void addIdentityFile(const std::string& path);
     void addIdentityImage(ff::Image&& img, const std::string& label);
     void removeIdentity(int index);
@@ -252,6 +258,10 @@ struct App {
 
     void saveResult(const std::string& path);
     void copyResult();
+    // PNG-encodes the currently displayed image (result with the retouch mask
+    // blended in). Returns false when there is nothing to encode. Used for
+    // drag-out and image paste tests.
+    bool encodeDisplayPng(std::vector<uint8_t>& out);
     void applyResultAsInput();
     void clearTarget();
 
