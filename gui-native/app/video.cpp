@@ -1506,6 +1506,9 @@ ff::Image makeFaceThumb(const ff::Image& img, const float box[4]) {
 }
 
 void Video::ensureFaceThumbs() {
+    // Do not seek the decoder away from the playback window just to refresh
+    // thumbnails; they update on the next paused tick.
+    if (playing_) return;
     if (face_thumbs_stale_) {
         freeFaceThumbs();
         face_thumbs_stale_ = false;

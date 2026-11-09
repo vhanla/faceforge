@@ -1,9 +1,12 @@
 // On-demand video decoding for the video workspace.
 //
-// Frames are decoded straight from the container and copied into tightly
-// packed BGR buffers owned by the caller. Nothing is extracted to disk. A
-// handle remembers the next expected frame so playback and analysis read
-// sequentially instead of seeking for every frame.
+// Each handle owns a background worker that decodes a small ordered window of
+// frames ahead of the caller (a few MiB of Mat data, capped by cache_limit).
+// Sequential playback and analysis hit that window, so the UI thread only pays
+// for the final packed BGR copy instead of a seek plus decode; preview and
+// scrub requests still work, resetting the window when the caller jumps
+// backwards or far forwards. Nothing is extracted to disk and the returned
+// buffer is always owned by the caller.
 
 #include "faceforge.h"
 
@@ -12,13 +15,16 @@
 #include <opencv2/videoio.hpp>
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -34,8 +40,31 @@
 
 struct ff_video {
     cv::VideoCapture cap;
+
+    // Decode worker. The capture object is touched only by this thread after
+    // open; everything shared with callers is guarded by mu.
     std::mutex mu;
-    int64_t next = -1;
+    std::condition_variable cv;
+    std::thread worker;
+    bool quit = false;
+
+    int64_t pos = -1;   // frame index that the next cap.read() returns (worker)
+    int64_t next = -1;  // next frame the worker decodes sequentially
+    int64_t want = -1;  // most recently requested frame
+    bool failed = false;
+    int64_t failed_index = -1;
+
+    // Small ordered window of decoded frames. The Mats are kept as returned by
+    // the decoder (no extra copy); ff_video_frame still copies once to the
+    // caller-owned buffer.
+    struct Frame {
+        int64_t index = -1;
+        cv::Mat bgr;
+    };
+    std::deque<Frame> cache;
+    size_t cache_bytes = 0;
+    size_t cache_limit = 96u << 20;  // 96 MiB per handle
+
     int32_t width = 0;
     int32_t height = 0;
     double fps = 0.0;
@@ -44,6 +73,138 @@ struct ff_video {
 };
 
 namespace {
+
+bool open_capture(cv::VideoCapture& cap, const char* path) {
+    // OpenCV 5 can hand the FFmpeg decoder more worker threads; on older
+    // versions the parameter does not exist and the backend default applies.
+#if defined(CV_VERSION_MAJOR) && CV_VERSION_MAJOR >= 5
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned want = hw > 1 ? hw - 1 : 1;
+    const int threads = static_cast<int>(std::min<unsigned>(want, 8u));
+    std::vector<int> params{cv::CAP_PROP_N_THREADS, threads};
+    if (cap.open(cv::String(path), cv::CAP_ANY, params)) return true;
+    cap.release();
+#endif
+    return cap.open(path, cv::CAP_ANY);
+}
+
+ff_video::Frame* find_frame(ff_video* v, int64_t index) {
+    for (auto& f : v->cache) {
+        if (f.index == index) return &f;
+    }
+    return nullptr;
+}
+
+int prefetch_ahead(const ff_video* v) {
+    if (v->cache.empty()) return 4;
+    const auto& m = v->cache.front().bgr;
+    const size_t frame_bytes = m.total() * m.elemSize();
+    if (frame_bytes == 0) return 4;
+    const size_t fit = v->cache_limit / frame_bytes;
+    return static_cast<int>(std::clamp<size_t>(fit, 2, 12));
+}
+
+size_t frame_bytes(const cv::Mat& m) { return m.total() * m.elemSize(); }
+
+void evict_to_limit(ff_video* v) {
+    const size_t cap = static_cast<size_t>(prefetch_ahead(v));
+    while (!v->cache.empty() &&
+           (v->cache_bytes > v->cache_limit || v->cache.size() > cap)) {
+        v->cache_bytes -= frame_bytes(v->cache.front().bgr);
+        v->cache.pop_front();
+    }
+}
+
+// Worker-only: decode `index` into `out`. `pos` tracks what the next
+// sequential read will return so seeks only happen when the request is not the
+// frame we are already standing on.
+bool decode_frame(ff_video* v, int64_t index, ff_video::Frame& out) {
+    if (v->pos != index) {
+        if (!v->cap.set(cv::CAP_PROP_POS_FRAMES, static_cast<double>(index)))
+            return false;
+        v->pos = index;
+    }
+    cv::Mat frame;
+    if (!v->cap.read(frame) || frame.empty()) return false;
+    v->pos = index + 1;
+
+    cv::Mat bgr;
+    if (frame.channels() == 3) {
+        bgr = frame;
+    } else if (frame.channels() == 4) {
+        cv::cvtColor(frame, bgr, cv::COLOR_BGRA2BGR);
+    } else {
+        cv::cvtColor(frame, bgr, cv::COLOR_GRAY2BGR);
+    }
+    if (!bgr.isContinuous()) bgr = bgr.clone();
+
+    out.index = index;
+    out.bgr = std::move(bgr);
+    return true;
+}
+
+void prefetch_main(ff_video* v) {
+    std::unique_lock<std::mutex> lk(v->mu);
+    while (!v->quit) {
+        if (v->want < 0) {
+            v->cv.wait(lk);
+            continue;
+        }
+        const int ahead = prefetch_ahead(v);
+        const int64_t limit = v->frames > 0 ? v->frames - 1 : INT64_MAX;
+        const int64_t target = std::clamp<int64_t>(v->want, 0, limit);
+        const int64_t window_end =
+            std::min<int64_t>(limit, target + static_cast<int64_t>(ahead) - 1);
+
+        // A request behind the decoder (and not already cached) means the
+        // caller jumped backwards; a large forward jump is cheaper to seek than
+        // to decode every frame in between.
+        const bool behind = target < v->next && find_frame(v, target) == nullptr;
+        const bool far_ahead =
+            target > v->next + static_cast<int64_t>(ahead) * 2;
+        if (behind || far_ahead) {
+            v->next = target;
+            v->pos = -1;
+            v->cache.clear();
+            v->cache_bytes = 0;
+            v->failed = false;
+            v->failed_index = -1;
+            continue;
+        }
+
+        if (v->next > window_end || v->next > limit) {
+            v->cv.wait(lk);
+            continue;
+        }
+        if (find_frame(v, v->next)) {
+            ++v->next;
+            continue;
+        }
+
+        const int64_t index = v->next;
+        lk.unlock();
+        ff_video::Frame out;
+        const bool ok = decode_frame(v, index, out);
+        lk.lock();
+        if (v->quit) break;
+        if (!ok) {
+            v->failed = true;
+            v->failed_index = index;
+            // Skip the bad frame instead of spinning on it. A new request for
+            // the same index seeks back and retries.
+            v->next = index + 1;
+            v->pos = -1;
+            v->cv.notify_all();
+            v->cv.wait(lk);
+            continue;
+        }
+        v->cache_bytes += frame_bytes(out.bgr);
+        v->cache.push_back(std::move(out));
+        v->next = index + 1;
+        evict_to_limit(v);
+        v->cv.notify_all();
+    }
+}
 
 void set_error(char* err, int32_t err_len, const char* msg) {
     if (!err || err_len <= 0) return;
@@ -100,7 +261,7 @@ ff_video* ff_video_open(const char* path, char* err, int32_t err_len) {
         return nullptr;
     }
     auto v = std::make_unique<ff_video>();
-    if (!v->cap.open(path, cv::CAP_ANY)) {
+    if (!open_capture(v->cap, path)) {
         set_error(err, err_len, "cannot open video");
         return nullptr;
     }
@@ -120,12 +281,24 @@ ff_video* ff_video_open(const char* path, char* err, int32_t err_len) {
         }
         v->width = probe.cols;
         v->height = probe.rows;
-        v->next = 1;
+        v->pos = 1;
     }
+    v->next = 0;
+    v->want = -1;
+    v->worker = std::thread(prefetch_main, v.get());
     return v.release();
 }
 
-void ff_video_close(ff_video* video) { delete video; }
+void ff_video_close(ff_video* video) {
+    if (!video) return;
+    {
+        std::lock_guard<std::mutex> lock(video->mu);
+        video->quit = true;
+        video->cv.notify_all();
+    }
+    if (video->worker.joinable()) video->worker.join();
+    delete video;
+}
 
 int32_t ff_video_info(const ff_video* video, int32_t* out_width,
                       int32_t* out_height, double* out_fps, int64_t* out_frames,
@@ -145,42 +318,46 @@ int32_t ff_video_frame(ff_video* video, int64_t index, uint8_t** out_bgr,
     if (!video || !out_bgr || index < 0) return FF_ERR_INVALID;
     *out_bgr = nullptr;
 
-    std::lock_guard<std::mutex> lock(video->mu);
-    if (video->next != index) {
-        if (!video->cap.set(cv::CAP_PROP_POS_FRAMES, static_cast<double>(index))) {
-            return FF_ERR_IO;
-        }
-        video->next = index;
+    std::unique_lock<std::mutex> lock(video->mu);
+    if (video->quit) return FF_ERR_IO;
+    if (video->frames > 0 && index >= video->frames) return FF_ERR_IO;
+
+    ff_video::Frame* hit = find_frame(video, index);
+    if (!hit) {
+        video->want = index;
+        video->failed = false;
+        video->failed_index = -1;
+        video->cv.notify_all();
+        video->cv.wait(lock, [&] {
+            return video->quit || find_frame(video, index) != nullptr ||
+                   (video->failed && video->failed_index == index);
+        });
+        if (video->quit) return FF_ERR_IO;
+        hit = find_frame(video, index);
     }
+    // Follow the served frame so prefetch keeps looking ahead of the caller.
+    video->want = index;
+    video->cv.notify_all();
+    if (!hit) return FF_ERR_IO;
 
-    cv::Mat frame;
-    if (!video->cap.read(frame) || frame.empty()) return FF_ERR_IO;
-    video->next = index + 1;
-
-    cv::Mat bgr;
-    if (frame.channels() == 3) {
-        bgr = frame;
-    } else if (frame.channels() == 4) {
-        cv::cvtColor(frame, bgr, cv::COLOR_BGRA2BGR);
-    } else {
-        cv::cvtColor(frame, bgr, cv::COLOR_GRAY2BGR);
-    }
-    if (!bgr.isContinuous()) bgr = bgr.clone();
-
-    const int32_t w = bgr.cols;
-    const int32_t h = bgr.rows;
+    // Take a refcounted shallow copy and release the lock before the memcpy so
+    // the decode worker can keep inserting prefetched frames meanwhile.
+    cv::Mat hold = hit->bgr;
+    const int32_t w = hold.cols;
+    const int32_t h = hold.rows;
     const int32_t stride = w * 3;
-    const size_t bytes = static_cast<size_t>(stride) * static_cast<size_t>(h);
-    auto* data = static_cast<uint8_t*>(std::malloc(bytes));
-    if (!data) return FF_ERR_NOMEM;
-    std::memcpy(data, bgr.data, bytes);
-
     if (video->width <= 0 || video->height <= 0) {
         video->width = w;
         video->height = h;
         video->frames = 0;
-        video->duration = 0;
+        video->duration = 0.0;
     }
+    lock.unlock();
+
+    const size_t bytes = static_cast<size_t>(stride) * static_cast<size_t>(h);
+    auto* data = static_cast<uint8_t*>(std::malloc(bytes));
+    if (!data) return FF_ERR_NOMEM;
+    std::memcpy(data, hold.data, bytes);
 
     *out_bgr = data;
     if (out_width) *out_width = w;

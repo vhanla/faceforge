@@ -64,6 +64,43 @@ result stays bit-identical while the matrix is streamed once.
 
 Measured: **0.172 ms -> 0.089 ms** per face.
 
+### Video decode prefetch
+
+Playback used to decode every frame on the UI thread the moment it was needed:
+`ff_video_frame` seeked the `cv::VideoCapture`, read, converted and copied, all
+inside the frame the GUI was about to draw. That blocked the UI for the full
+decode (4-6 ms at 1080p, ~17-22 ms at 4K on this machine) and made it compete
+with inference on the same cores.
+
+Each `ff_video` handle now runs a decode worker with a small ordered window of
+`cv::Mat` frames:
+
+- The worker decodes forward from the last requested frame and keeps up to
+  96 MiB (clamped to 2..12 frames, so 1080p keeps ~12 and 4K keeps ~4) ready.
+  A sequential reader pops frames the worker already finished.
+- Backward requests and forward jumps beyond twice the window reset the
+  capture instead of decoding every frame in between, which keeps scrubbing
+  responsive.
+- The worker hands the caller a refcounted shallow copy of the Mat and releases
+  the lock, so the single caller-owned `malloc`+`memcpy` no longer stalls new
+  decodes.
+- OpenCV 5 opens the FFmpeg backend with `CAP_PROP_N_THREADS = min(hw-1, 8)`;
+  OpenCV 4 keeps the backend default. Pacing the calls at 30 fps, direct
+  decode+copy measured 2.77 ms median per call at 1080p versus 2.30 ms with
+  prefetch; at 4K both stay dominated by the ~9.8 ms copy. The win is less the
+  raw average than moving the decode (and its seeks) off the UI thread and
+  overlapping it with analysis inference, at the cost of at most ~96 MiB per
+  decoder.
+
+`ensureFaceThumbs()` in the GUI skips its seek while playing, so the thumbnail
+strip cannot pull the playback decoder away from its window.
+
+Reproduce the numbers with a throwaway loop: plain `cv::VideoCapture::read` plus
+a `memcpy` per frame versus `ff_video_frame` on the same file, both paced to the
+container frame rate with `sleep_for(1000/fps)` between calls and the first
+frame dropped as warm-up. The ad-hoc benchmarks used for this note live outside
+the repository.
+
 ### Loops examined and left alone
 
 - `to_blob_rect` (BGR interleaved -> planar float NCHW) is memory-bound: a
