@@ -468,7 +468,15 @@ int main(int argc, char** argv) {
     // Zig GUI's scripted E2E entry points.
     std::string target = options.target;
     if (!options.target_set) {
-        if (const char* v = std::getenv("FACEFORGE_TARGET")) target = v;
+        if (const char* v = std::getenv("FACEFORGE_TARGET")) {
+            target = v;
+        } else if (FILE* f = std::fopen(target.c_str(), "rb")) {
+            std::fclose(f);
+        } else {
+            // The default target is a dev convenience; a packaged or out-of-tree
+            // launch should start clean instead of reporting a load error.
+            target.clear();
+        }
     }
     std::vector<std::string> identities = options.identities;
     if (identities.empty()) {
@@ -486,8 +494,16 @@ int main(int argc, char** argv) {
     }
 
     // Match the Zig GUI: the bundled portrait is the default identity unless a
-    // run supplies its own list.
-    if (identities.empty()) identities.push_back("assets/source_lena.jpg");
+    // run supplies its own list. Only when it is actually present: a packaged
+    // or out-of-tree launch has no assets/ dir and should start clean rather
+    // than report a bogus "Cannot load identity image" before any interaction.
+    if (identities.empty()) {
+        const char* kDefaultIdentity = "assets/source_lena.jpg";
+        if (FILE* f = std::fopen(kDefaultIdentity, "rb")) {
+            std::fclose(f);
+            identities.push_back(kDefaultIdentity);
+        }
+    }
 
     if (!target.empty()) {
         app->openTarget(target);
