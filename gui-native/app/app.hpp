@@ -144,6 +144,7 @@ struct App {
     uint8_t provider = 0;
     Mode mode = Mode::Photo;
     Enhancer enhancer = Enhancer::Gfpgan;
+    int upscale_scale = 0; // 0 = off, 2 or 4 = Real-ESRGAN on the composed result
     bool restore_mouth = true;
     bool fast_preview = true;
     bool unload_after_run = false;
@@ -445,6 +446,7 @@ private:
     std::string job_model_dir_;
     int job_provider_ = 0;
     int job_enhancer_ = 0;
+    int job_upscale_scale_ = 0;
     bool job_restore_mouth_ = false;
     bool job_fast_preview_ = false;
     bool job_unload_ = false;

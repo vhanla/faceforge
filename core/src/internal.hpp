@@ -142,6 +142,9 @@ int enhance_gfpgan(Engine& e, const cv::Mat& bgr, const std::vector<ff_face>& fa
                    cv::Mat& out, ff_progress_fn cb, void* user);
 int enhance_esrgan(Engine& e, const cv::Mat& bgr, int scale, cv::Mat& out,
                    ff_progress_fn cb, void* user);
+// Real-ESRGAN at the model's native scale (w*scale x h*scale), no resize back.
+int upscale_esrgan(Engine& e, const cv::Mat& bgr, int scale, cv::Mat& out,
+                   ff_progress_fn cb, void* user);
 
 // emap.bin: 512*512 little-endian float32, row-major.
 bool load_emap(const std::string& path, std::vector<float>& emap);

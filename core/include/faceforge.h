@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define FF_ABI_VERSION 4
+#define FF_ABI_VERSION 5
 
 /* Return codes */
 #define FF_OK 0
@@ -166,6 +166,17 @@ int32_t ff_enhance(ff_engine* engine,
                    const uint8_t* bgr, int32_t width, int32_t height, int32_t stride,
                    const ff_face* faces, int32_t face_count,
                    uint8_t* out_bgr,
+                   ff_progress_fn cb, void* user_data);
+
+/* Upscale a whole BGR image with Real-ESRGAN at the model's native scale.
+ * `scale` must be 2 or 4. The result is tightly packed BGR of size
+ * (width*scale, height*scale); the caller owns *out_bgr and releases it with
+ * ff_image_free. This is the standalone upscaler: unlike the ESRGAN entries in
+ * ff_enhancer it never resizes back to the input. */
+int32_t ff_upscale(ff_engine* engine,
+                   const uint8_t* bgr, int32_t width, int32_t height, int32_t stride,
+                   int32_t scale,
+                   uint8_t** out_bgr, int32_t* out_width, int32_t* out_height,
                    ff_progress_fn cb, void* user_data);
 
 /* End-to-end: detect the best source face, swap every target face with it,

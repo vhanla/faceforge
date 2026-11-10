@@ -135,6 +135,10 @@ struct Engine {
                     double matrix[6], bool* ok) const;
     bool enhance(const Image& img, const ff_face* faces, int face_count, Image* out,
                  ff_progress_fn cb = nullptr, void* user = nullptr) const;
+    // Standalone Real-ESRGAN upscale (scale 2 or 4). Returns a new image at the
+    // model's native size, never resized back to the input.
+    bool upscale(const Image& img, int scale, Image* out,
+                 ff_progress_fn cb = nullptr, void* user = nullptr) const;
 };
 
 // On-demand video decoder. Not thread-safe; one handle per thread.

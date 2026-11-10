@@ -173,6 +173,22 @@ bool Engine::enhance(const Image& img, const ff_face* faces, int face_count, Ima
                       out->data, cb, user) == FF_OK;
 }
 
+bool Engine::upscale(const Image& img, int scale, Image* out, ff_progress_fn cb,
+                     void* user) const {
+    if (!ptr || !out) return false;
+    uint8_t* data = nullptr;
+    int32_t ow = 0;
+    int32_t oh = 0;
+    const int rc = ff_upscale(ptr, img.data, img.width, img.height, img.stride, scale, &data,
+                              &ow, &oh, cb, user);
+    if (rc != FF_OK || !data) {
+        if (data) ff_image_free(data);
+        return false;
+    }
+    *out = Image::fromOwned(data, ow, oh);
+    return true;
+}
+
 // ---- Video -----------------------------------------------------------------
 
 bool Video::open(const char* path, std::string* err) {

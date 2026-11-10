@@ -77,15 +77,17 @@ resize the final result) before it becomes the default.
 
 ## ABI shape
 
-The core is a pure C ABI (`core/include/faceforge.h`). `ff_options` already has
-`enhance` and `esrgan_tile`, plus a reserved `pad`. Options:
+The core is a pure C ABI (`core/include/faceforge.h`). Phase 1 took the
+standalone route: `ff_upscale(engine, in, w, h, stride, scale, out, out_w,
+out_h, cb, user)` returns a newly allocated image at the model's native size
+(freed with `ff_image_free`). It never resizes back, and it unloads the other
+ESRGAN session so alternating x2/x4 stays within the memory budget. This kept
+`ff_options` and `ff_enhance` untouched; the ABI version was bumped to 5 because
+of the new symbol.
 
-- Keep `enhance` = restoration, add `upscale` (enum `NONE/X1/X2/X4`) and
-  `out_width/out_height` (0 = input), or
-- expose a standalone `ff_upscale(engine, in, scale, out)` and let the GUI do
-  the final resize to a preset.
-
-Either way the ABI changes, so `FF_ABI_VERSION` must be bumped.
+`ff_enhance` still resizes ESRGAN output back to the input (its `out_bgr` is
+documented as full-size), so the bench harness keeps working. The GUI no longer
+exposes that path.
 
 Models: Real-ESRGAN x2/x4 already download (`scripts/fetch_models.sh:56`);
 adding x1 and GFPGAN 1.3 is one line each. All remain non-commercial; check the
@@ -93,10 +95,12 @@ licence before shipping.
 
 ## Phases
 
-0. **Do not mislead.** Drop x2/x4 from the Enhancer combo (done) so the broken
-   path is unreachable from the UI.
-1. **Standalone image upscaler.** Real x2/x4 with no resize-back, its own
-   control, run through a worker job with progress.
+0. **Do not mislead.** Drop x2/x4 from the Enhancer combo. Done.
+1. **Standalone image upscaler.** `ff_upscale` (x2/x4, no resize-back) wired
+   into the photo pipeline as an optional final stage on the composed result,
+   with a dedicated Upscale combo, worker progress and a canvas that uses the
+   result's real dimensions (faces and the Studio brush map from base space).
+   Done.
 2. **Output presets.** Aspect-ratio-aware target sizes and the smart downscale
    choice.
 3. **Cost warnings and fallback.** VRAM/pixel estimate, CPU fallback notice,

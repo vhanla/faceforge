@@ -992,8 +992,12 @@ void App::spawnJob(JobKind kind, int arg) {
     job_arg_ = arg;
     job_provider_ = static_cast<int>(provider);
     job_enhancer_ = static_cast<int>(enhancer);
+    job_upscale_scale_ = upscale_scale;
     job_restore_mouth_ = restore_mouth;
-    job_fast_preview_ = fast_preview && pending_export_ == ExportKind::None;
+    // The upscaler always works on the full-resolution result, so fast preview
+    // is skipped while it is on.
+    job_fast_preview_ = fast_preview && pending_export_ == ExportKind::None &&
+                        upscale_scale == 0;
     job_unload_ = unload_after_run;
 
     job_error_.clear();
@@ -1339,6 +1343,8 @@ uint64_t App::composeSignature() const {
     mix(&proc_h, sizeof(proc_h));
     const int enh = job_enhancer_;
     mix(&enh, sizeof(enh));
+    const int upscale = job_upscale_scale_;
+    mix(&upscale, sizeof(upscale));
     std::lock_guard<std::mutex> lk(mu_);
     for (int i = 0; i < face_count; ++i) {
         const bool active = face_sel[i] && patches[proc_level][i].valid;
@@ -1413,9 +1419,24 @@ bool App::composeResult() {
         engine.setEnhancer(0);
     }
 
-    pending_result_.assign(cur.data, cur.data + bytes);
-    pending_w_ = w;
-    pending_h_ = h;
+    // Optional standalone Real-ESRGAN pass on the composed result. Unlike the
+    // ESRGAN entries in the old enhancer combo this keeps the model's output
+    // size, so the result really is larger.
+    if (job_upscale_scale_ > 0) {
+        setStage(Stage::Enhancing, 950);
+        const int64_t t1 = ff::nowNs();
+        ff::Image up;
+        if (!engine.upscale(cur, job_upscale_scale_, &up, progressCb, this)) {
+            return jobFail(engine.lastError());
+        }
+        cur = std::move(up);
+        timings.enhance_ms += nsToMs(ff::nowNs() - t1);
+    }
+
+    const size_t out_bytes = static_cast<size_t>(cur.width) * static_cast<size_t>(cur.height) * 3;
+    pending_result_.assign(cur.data, cur.data + out_bytes);
+    pending_w_ = cur.width;
+    pending_h_ = cur.height;
     result_sig = sig;
     result_level = proc_w;
     setProgress(1000);

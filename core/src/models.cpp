@@ -507,10 +507,12 @@ int enhance_gfpgan(Engine& e, const cv::Mat& bgr, const std::vector<ff_face>& fa
 }
 
 // ---------------------------------------------------------------------------
-// Real-ESRGAN (whole frame, tiled, then resized back to the input size)
+// Real-ESRGAN (whole frame, tiled). upscale_esrgan keeps the model's native
+// output size; enhance_esrgan wraps it and resizes back to the input, which is
+// what the ff_enhance contract wants but is not useful as an upscaler.
 // ---------------------------------------------------------------------------
 
-int enhance_esrgan(Engine& e, const cv::Mat& bgr, int scale, cv::Mat& out,
+int upscale_esrgan(Engine& e, const cv::Mat& bgr, int scale, cv::Mat& out,
                    ff_progress_fn cb, void* user) {
     const std::string file =
         (scale == 4) ? "real_esrgan_x4.onnx" : "real_esrgan_x2.onnx";
@@ -594,7 +596,16 @@ int enhance_esrgan(Engine& e, const cv::Mat& bgr, int scale, cv::Mat& out,
         }
     }
 
-    cv::resize(upscaled, out, cv::Size(w, h), 0, 0, cv::INTER_AREA);
+    out = std::move(upscaled);
+    return FF_OK;
+}
+
+int enhance_esrgan(Engine& e, const cv::Mat& bgr, int scale, cv::Mat& out,
+                   ff_progress_fn cb, void* user) {
+    cv::Mat up;
+    const int rc = upscale_esrgan(e, bgr, scale, up, cb, user);
+    if (rc != FF_OK) return rc;
+    cv::resize(up, out, bgr.size(), 0, 0, cv::INTER_AREA);
     return FF_OK;
 }
 

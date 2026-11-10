@@ -411,7 +411,7 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     // The expanded Studio panel adds ~250 px of controls plus the shifted Output
     // section, so give the scroll range room for it.
     const bool studio_open = app && app->studio;
-    const float content_bottom = studio_open ? 1180.0f : 720.0f;
+    const float content_bottom = studio_open ? 1235.0f : 775.0f;
     const float max_scroll = std::max(0.0f, content_bottom - (scroll_view_bottom - view_y));
     state->left_scroll = std::clamp(state->left_scroll, 0.0f, max_scroll);
     const float oy = view_y + 12.0f - state->left_scroll;
@@ -524,8 +524,28 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         if (unload != app->unload_after_run) { app->unload_after_run = unload; app->markConfigDirty(); }
     }
 
+    // Real-ESRGAN upscale of the composed result. Kept out of the enhancer
+    // combo on purpose: restoring faces and enlarging the frame are different
+    // operations (see docs/upscaling.md).
+    const float uy = qy + 168.0f;
+    ui_text(a, ctx, x + 22.0f, uy + 6.0f, "Upscale", t.text, 13.5f, 2);
+    static const char* kUpscalers[] = {"Off", "2x", "4x"};
+    static const int kUpscalerScale[] = {0, 2, 4};
+    int up_idx = 0;
+    if (app) {
+        for (int i = 0; i < 3; ++i) {
+            if (app->upscale_scale == kUpscalerScale[i]) up_idx = i;
+        }
+    }
+    if (ui_combo(a, ctx, Rect{x + 109.0f, uy, 157.0f, 32.0f}, kUpscalers, 3, &up_idx, &t)) {
+        if (app) {
+            app->upscale_scale = kUpscalerScale[up_idx];
+            app->processAll();
+        }
+    }
+
     // Studio
-    float sy = qy + 160.0f;
+    float sy = qy + 215.0f;
     section_header(a, ctx, t, x, sy, ICON_BOX_FILLED, "Studio");
 
     if (studio_open) {
@@ -824,8 +844,17 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     }
 
     if (tex != 0 && have_base) {
-        const float ref_w = static_cast<float>(app->base.width);
-        const float ref_h = static_cast<float>(app->base.height);
+        // The displayed texture can be larger than the base when the result was
+        // upscaled, so size the drawn rect and fit/zoom from the view image and
+        // map base-space overlays (faces, brush) through view_sx/view_sy.
+        const bool show_result = tex == state->result_tex && app->result.valid() &&
+                                 app->result.width > 0 && app->result.height > 0;
+        const int32_t view_w = show_result ? app->result.width : app->base.width;
+        const int32_t view_h = show_result ? app->result.height : app->base.height;
+        const float view_sx = static_cast<float>(view_w) / static_cast<float>(app->base.width);
+        const float view_sy = static_cast<float>(view_h) / static_cast<float>(app->base.height);
+        const float ref_w = static_cast<float>(view_w);
+        const float ref_h = static_cast<float>(view_h);
         const float pad = 8.0f;
         const float avail_w = canvas.w - pad * 2.0f;
         const float avail_h = canvas.h - pad * 2.0f;
@@ -955,7 +984,7 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
                                   ctx->mouse_y >= dst.y && ctx->mouse_y <= dst.y + dst.h;
             if (mouse_in) {
                 const float brush = app ? app->studio_size : 60.0f;
-                const float r = brush * scale;
+                const float r = brush * view_sx * scale;
                 ui_rect_border(a, ctx,
                                Rect{ctx->mouse_x - r * 0.5f, ctx->mouse_y - r * 0.5f, r, r},
                                app && app->studio_erase ? t.accent : t.on_accent, r * 0.5f, 1.5f);
@@ -968,10 +997,10 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         if (!studio && state->overlay && !show_original && app) {
             app::FacesSnapshot snap = app->facesSnapshot();
             for (int i = 0; i < snap.count; ++i) {
-                const float bx = dst.x + snap.faces[i].bbox[0] * scale;
-                const float by = dst.y + snap.faces[i].bbox[1] * scale;
-                const float bw = (snap.faces[i].bbox[2] - snap.faces[i].bbox[0]) * scale;
-                const float bh = (snap.faces[i].bbox[3] - snap.faces[i].bbox[1]) * scale;
+                const float bx = dst.x + snap.faces[i].bbox[0] * view_sx * scale;
+                const float by = dst.y + snap.faces[i].bbox[1] * view_sy * scale;
+                const float bw = (snap.faces[i].bbox[2] - snap.faces[i].bbox[0]) * view_sx * scale;
+                const float bh = (snap.faces[i].bbox[3] - snap.faces[i].bbox[1]) * view_sy * scale;
                 const Rect fr{bx, by, bw, bh};
                 const Color box_col = snap.sel[i] ? Color{0x34, 0xd3, 0x99, 0xff}
                                                   : Color{0x8b, 0x95, 0xa5, 0xff};

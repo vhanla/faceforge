@@ -565,6 +565,47 @@ int32_t ff_enhance(ff_engine* engine, const uint8_t* bgr, int32_t width, int32_t
     }
 }
 
+int32_t ff_upscale(ff_engine* engine, const uint8_t* bgr, int32_t width, int32_t height,
+                   int32_t stride, int32_t scale, uint8_t** out_bgr, int32_t* out_width,
+                   int32_t* out_height, ff_progress_fn cb, void* user_data) {
+    if (!engine || !bgr || !out_bgr) return FF_ERR_INVALID;
+    if (scale != 2 && scale != 4) return FF_ERR_INVALID;
+    *out_bgr = nullptr;
+    std::lock_guard<std::mutex> lock(engine->mu);
+    engine->clear_error();
+    try {
+        // Keep only the session we are about to use so the memory budget holds
+        // when the user alternates between x2 and x4.
+        engine->unload(scale == 4 ? "esrgan2" : "esrgan4");
+
+        cv::Mat img = wrap_bgr(bgr, width, height, stride);
+        cv::Mat result;
+        const auto t0 = Clock::now();
+        const int rc = upscale_esrgan(*engine, img, scale, result, cb, user_data);
+        if (rc != FF_OK) return rc;
+
+        const int ow = result.cols;
+        const int oh = result.rows;
+        const size_t bytes = static_cast<size_t>(ow) * static_cast<size_t>(oh) * 3;
+        auto* data = static_cast<uint8_t*>(std::malloc(bytes));
+        if (!data) return FF_ERR_RUNTIME;
+        for (int y = 0; y < oh; ++y) {
+            std::memcpy(data + static_cast<size_t>(y) * static_cast<size_t>(ow) * 3,
+                        result.ptr<uint8_t>(y), static_cast<size_t>(ow) * 3);
+        }
+        *out_bgr = data;
+        if (out_width) *out_width = ow;
+        if (out_height) *out_height = oh;
+        engine->stats.enhance_ms = ms_since(t0);
+        engine->stats.provider = engine->using_cuda ? FF_PROVIDER_CUDA : FF_PROVIDER_CPU;
+        engine->stats.sessions_loaded = static_cast<int32_t>(engine->sessions.size());
+        return FF_OK;
+    } catch (const std::exception& ex) {
+        engine->set_error(std::string("ff_upscale: ") + ex.what());
+        return FF_ERR_RUNTIME;
+    }
+}
+
 int32_t ff_process(ff_engine* engine, const uint8_t* target_bgr, int32_t target_w,
                    int32_t target_h, int32_t target_stride, const uint8_t* source_bgr,
                    int32_t source_w, int32_t source_h, int32_t source_stride,
