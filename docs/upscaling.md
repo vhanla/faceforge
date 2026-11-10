@@ -42,26 +42,28 @@ swap faces -> [Restore] -> [Upscale] -> (optional) resize to target size
 
 - **Restore** (faces): `None / GFPGAN 1.4` (GFPGAN 1.3 is a possible extra if it
   measures better).
-- **Upscale** (frame): `Off / x1 / x2 / x4`. `x1` denoises and sharpens without
-  changing size.
-- **Output preset**: `1080p / 1440p / 4K` derived from the input aspect ratio,
-  or a free size.
+- **Upscale** (frame): `Off / x2 / x4` (`x1` denoise-only is not implemented).
+- **Output preset**: `1080p / 1440p / 4K` derived from the input aspect ratio, or
+  a free size (only the 16:9 presets are exposed today).
 - Rule: when the user asks for an upscale, never resize back to `w, h`. Output
   is either the model's native scale or the requested preset.
 
 ### Smart scale choice
 
-For a requested output, pick a downscale `d` and a model scale `s` so that
-`d * s >= target / input`, with the least overshoot, then resize exactly to the
-target:
+For a requested output, pick the smallest model scale `s` that can reach the
+target (`h * s >= target_h`), run the model, then resize to the exact target
+height with the width from the input aspect ratio:
 
-- 1280x720 -> 1080p (ratio 1.5), `x2`: `d = 1920 / (2 * 1280) = 0.75`, so the
-  model runs at 960x540 and 2x lands exactly on 1920x1080.
-- 1280x720 -> 1080p, `x4`: `d = 0.375`, model runs at 480x270.
+- 320x180 -> 1080p: `180 * 2 = 360 < 1080`, so `s = 4` (1280x720), then resize
+  to 1920x1080.
+- 720x405 -> 1440p: `405 * 4 = 1620 >= 1440`, so `s = 4`, then resize to
+  2560x1440.
 
-A pre-downscale of the input trades real detail for model-invented detail, so
-the heuristic must be measured against the plain path (upscale the input and
-resize the final result) before it becomes the default.
+The final resize always goes *down* from the model output, never up, so it does
+not invent detail beyond what the model produced. The alternative considered was
+a pre-downscale of the input (`d * s >= target / input`) so the model runs
+smaller and lands almost exactly on the target; that trades real input detail for
+model-invented detail and is unproven, so it is not the default.
 
 ### Cost and limits
 
@@ -101,7 +103,9 @@ licence before shipping.
    with a dedicated Upscale combo, worker progress and a canvas that uses the
    result's real dimensions (faces and the Studio brush map from base space).
    Done.
-2. **Output presets.** Aspect-ratio-aware target sizes and the smart downscale
-   choice.
+2. **Output presets.** A single Upscale combo: `Off / 2x / 4x` plus `1080p /
+   1440p / 4K`, shown only for 16:9 inputs (|AR - 16/9| < 0.02) and only when
+   the preset would enlarge the input. A preset picks the smallest model scale
+   reaching the target and resizes exactly to it. Done.
 3. **Cost warnings and fallback.** VRAM/pixel estimate, CPU fallback notice,
    then video.

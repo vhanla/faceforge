@@ -526,20 +526,60 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
 
     // Real-ESRGAN upscale of the composed result. Kept out of the enhancer
     // combo on purpose: restoring faces and enlarging the frame are different
-    // operations (see docs/upscaling.md).
+    // operations (see docs/upscaling.md). Presets only appear when they would
+    // actually enlarge the input, so the list stays short.
     const float uy = qy + 168.0f;
     ui_text(a, ctx, x + 22.0f, uy + 6.0f, "Upscale", t.text, 13.5f, 2);
-    static const char* kUpscalers[] = {"Off", "2x", "4x"};
-    static const int kUpscalerScale[] = {0, 2, 4};
-    int up_idx = 0;
-    if (app) {
-        for (int i = 0; i < 3; ++i) {
-            if (app->upscale_scale == kUpscalerScale[i]) up_idx = i;
+    const char* up_labels[8];
+    int up_scales[8];
+    int up_targets[8];
+    int up_count = 0;
+    up_labels[up_count] = "Off"; up_scales[up_count] = 0; up_targets[up_count] = 0; ++up_count;
+    up_labels[up_count] = "2x"; up_scales[up_count] = 2; up_targets[up_count] = 0; ++up_count;
+    up_labels[up_count] = "4x"; up_scales[up_count] = 4; up_targets[up_count] = 0; ++up_count;
+    const int in_h = app ? app->base.height : 0;
+    const float in_ar =
+        (app && app->base.height > 0)
+            ? static_cast<float>(app->base.width) / static_cast<float>(app->base.height)
+            : 0.0f;
+    if (in_h > 0 && std::fabs(in_ar - 16.0f / 9.0f) < 0.02f) {
+        static const struct {
+            const char* label;
+            int h;
+        } kPresets[] = {{"1080p", 1080}, {"1440p", 1440}, {"4K", 2160}};
+        for (const auto& p : kPresets) {
+            if (p.h > in_h && up_count < 8) {
+                up_labels[up_count] = p.label;
+                up_scales[up_count] = 0;
+                up_targets[up_count] = p.h;
+                ++up_count;
+            }
         }
     }
-    if (ui_combo(a, ctx, Rect{x + 109.0f, uy, 157.0f, 32.0f}, kUpscalers, 3, &up_idx, &t)) {
+    int up_idx = 0;
+    bool up_matched = false;
+    if (app) {
+        for (int i = 0; i < up_count; ++i) {
+            if (app->upscale_scale == up_scales[i] &&
+                app->upscale_target_h == up_targets[i]) {
+                up_idx = i;
+                up_matched = true;
+            }
+        }
+        // A preset can become invalid when a different input is loaded (e.g. 4K
+        // chosen, then a smaller-than-4K image opened). Fall back to Off so the
+        // shown selection always matches the state the worker will use.
+        if (!up_matched) {
+            app->upscale_scale = 0;
+            app->upscale_target_h = 0;
+            up_idx = 0;
+        }
+    }
+    if (ui_combo(a, ctx, Rect{x + 109.0f, uy, 157.0f, 32.0f}, up_labels, up_count, &up_idx,
+                 &t)) {
         if (app) {
-            app->upscale_scale = kUpscalerScale[up_idx];
+            app->upscale_scale = up_scales[up_idx];
+            app->upscale_target_h = up_targets[up_idx];
             app->processAll();
         }
     }
@@ -2326,6 +2366,10 @@ void status_bar(Arena* a, UIContext* ctx, UIState* state) {
         if (vid && vid->isOpen()) {
             right = arena_fmt(a, "%dx%d \xC2\xB7 %.2f fps \xC2\xB7 F2 Theme", vid->info().width,
                               vid->info().height, vid->info().fps);
+        } else if (app && app->result.valid()) {
+            // Show the result size: it can be larger than the base after an
+            // upscale, and that is the image the user is looking at.
+            right = arena_fmt(a, "%dx%d \xC2\xB7 F2 Theme", app->result.width, app->result.height);
         } else if (app && app->base.valid()) {
             right = arena_fmt(a, "%dx%d \xC2\xB7 F2 Theme", app->base.width, app->base.height);
         }

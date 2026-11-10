@@ -993,11 +993,12 @@ void App::spawnJob(JobKind kind, int arg) {
     job_provider_ = static_cast<int>(provider);
     job_enhancer_ = static_cast<int>(enhancer);
     job_upscale_scale_ = upscale_scale;
+    job_upscale_target_h_ = upscale_target_h;
     job_restore_mouth_ = restore_mouth;
     // The upscaler always works on the full-resolution result, so fast preview
-    // is skipped while it is on.
+    // is skipped while it or a preset is active.
     job_fast_preview_ = fast_preview && pending_export_ == ExportKind::None &&
-                        upscale_scale == 0;
+                        upscale_scale == 0 && upscale_target_h == 0;
     job_unload_ = unload_after_run;
 
     job_error_.clear();
@@ -1345,6 +1346,8 @@ uint64_t App::composeSignature() const {
     mix(&enh, sizeof(enh));
     const int upscale = job_upscale_scale_;
     mix(&upscale, sizeof(upscale));
+    const int upscale_h = job_upscale_target_h_;
+    mix(&upscale_h, sizeof(upscale_h));
     std::lock_guard<std::mutex> lk(mu_);
     for (int i = 0; i < face_count; ++i) {
         const bool active = face_sel[i] && patches[proc_level][i].valid;
@@ -1421,15 +1424,40 @@ bool App::composeResult() {
 
     // Optional standalone Real-ESRGAN pass on the composed result. Unlike the
     // ESRGAN entries in the old enhancer combo this keeps the model's output
-    // size, so the result really is larger.
-    if (job_upscale_scale_ > 0) {
+    // size, so the result really is larger. A preset picks the smallest model
+    // scale that reaches the target and then resizes to the exact size.
+    if (job_upscale_scale_ > 0 || job_upscale_target_h_ > 0) {
         setStage(Stage::Enhancing, 950);
         const int64_t t1 = ff::nowNs();
-        ff::Image up;
-        if (!engine.upscale(cur, job_upscale_scale_, &up, progressCb, this)) {
-            return jobFail(engine.lastError());
+        int scale = job_upscale_scale_;
+        int target_h = job_upscale_target_h_;
+        int target_w = 0;
+        if (target_h > 0) {
+            if (h >= target_h) {
+                // The preset would not enlarge the input, so it is a no-op
+                // (the UI only offers presets that grow the image).
+                target_h = 0;
+            } else {
+                scale = (static_cast<int64_t>(h) * 2 >= target_h) ? 2 : 4;
+            }
         }
-        cur = std::move(up);
+        if (target_h > 0) {
+            target_w = static_cast<int>(std::lround(static_cast<double>(target_h) *
+                                                    static_cast<double>(w) /
+                                                    static_cast<double>(h)));
+        }
+        if (scale > 0) {
+            ff::Image up;
+            if (!engine.upscale(cur, scale, &up, progressCb, this)) {
+                return jobFail(engine.lastError());
+            }
+            cur = std::move(up);
+        }
+        if (target_h > 0 && (cur.width != target_w || cur.height != target_h)) {
+            ff::Image resized = cur.resized(target_w, target_h);
+            if (!resized.valid()) return jobFail("Cannot resize the upscaled result");
+            cur = std::move(resized);
+        }
         timings.enhance_ms += nsToMs(ff::nowNs() - t1);
     }
 
