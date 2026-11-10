@@ -189,6 +189,15 @@ bool Engine::upscale(const Image& img, int scale, Image* out, ff_progress_fn cb,
     return true;
 }
 
+bool Engine::grainMatch(const Image& result, const Image& reference, const ff_face* faces,
+                        int face_count, int strength, Image* out, ff_progress_fn cb,
+                        void* user) const {
+    return ptr && out && out->data &&
+           ff_grain_match(ptr, result.data, result.width, result.height, result.stride,
+                          out->data, reference.data, reference.width, reference.height,
+                          reference.stride, faces, face_count, strength, cb, user) == FF_OK;
+}
+
 // ---- Video -----------------------------------------------------------------
 
 bool Video::open(const char* path, std::string* err) {

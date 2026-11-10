@@ -994,6 +994,7 @@ void App::spawnJob(JobKind kind, int arg) {
     job_enhancer_ = static_cast<int>(enhancer);
     job_upscale_scale_ = upscale_scale;
     job_upscale_target_h_ = upscale_target_h;
+    job_grain_match_ = grain_match;
     job_restore_mouth_ = restore_mouth;
     // The upscaler always works on the full-resolution result, so fast preview
     // is skipped while it or a preset is active.
@@ -1348,6 +1349,8 @@ uint64_t App::composeSignature() const {
     mix(&upscale, sizeof(upscale));
     const int upscale_h = job_upscale_target_h_;
     mix(&upscale_h, sizeof(upscale_h));
+    const int grain = job_grain_match_;
+    mix(&grain, sizeof(grain));
     std::lock_guard<std::mutex> lk(mu_);
     for (int i = 0; i < face_count; ++i) {
         const bool active = face_sel[i] && patches[proc_level][i].valid;
@@ -1420,6 +1423,22 @@ bool App::composeResult() {
         timings.enhance_ms = nsToMs(ff::nowNs() - t0);
     } else {
         engine.setEnhancer(0);
+    }
+
+    // Re-texture the restored faces with the grain of the pristine target so a
+    // smoothed GFPGAN / swapper face does not stand out on a noisy photo. `proc`
+    // is the pristine image at the processing resolution (base or its preview),
+    // so the residual is the real original texture, not the model output.
+    if (job_grain_match_ > 0 && !active_faces.empty()) {
+        setStage(Stage::Enhancing, 925);
+        const int64_t t0 = ff::nowNs();
+        if (!engine.grainMatch(cur, proc, active_faces.data(),
+                               static_cast<int>(active_faces.size()), job_grain_match_, &next,
+                               progressCb, this)) {
+            return jobFail(engine.lastError());
+        }
+        std::swap(cur, next);
+        timings.enhance_ms += nsToMs(ff::nowNs() - t0);
     }
 
     // Optional standalone Real-ESRGAN pass on the composed result. Unlike the

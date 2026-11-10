@@ -146,6 +146,7 @@ struct App {
     Enhancer enhancer = Enhancer::Gfpgan;
     int upscale_scale = 0; // 0 = off, 2 or 4 = Real-ESRGAN on the composed result
     int upscale_target_h = 0; // >0 = resize the upscale to this output height
+    int grain_match = 0;      // 0 = off, 100 = match the input's grain on faces
     bool restore_mouth = true;
     bool fast_preview = true;
     bool unload_after_run = false;
@@ -449,6 +450,7 @@ private:
     int job_enhancer_ = 0;
     int job_upscale_scale_ = 0;
     int job_upscale_target_h_ = 0;
+    int job_grain_match_ = 0;
     bool job_restore_mouth_ = false;
     bool job_fast_preview_ = false;
     bool job_unload_ = false;

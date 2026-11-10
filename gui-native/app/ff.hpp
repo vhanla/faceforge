@@ -139,6 +139,11 @@ struct Engine {
     // model's native size, never resized back to the input.
     bool upscale(const Image& img, int scale, Image* out,
                  ff_progress_fn cb = nullptr, void* user = nullptr) const;
+    // Re-texture the faces in `result` with the grain of `reference` (pristine,
+    // pre-swap). `out` must be a valid image the same size as `result`.
+    bool grainMatch(const Image& result, const Image& reference, const ff_face* faces,
+                    int face_count, int strength, Image* out, ff_progress_fn cb = nullptr,
+                    void* user = nullptr) const;
 };
 
 // On-demand video decoder. Not thread-safe; one handle per thread.

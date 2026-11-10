@@ -404,6 +404,7 @@ private:
     bool job_use_cache_ = true;
     bool job_restore_mouth_ = true;
     int job_enhancer_ = 0;
+    int job_grain_match_ = 0;
     std::string job_out_;
 
     // Autotest.

@@ -31,7 +31,7 @@ compare the original against the result with a toggleable face overlay.
                                         │
                     inverse affine warp + diff-mask blend
                                         │
-                          GFPGAN 1.4 / Real-ESRGAN x2/x4
+                          GFPGAN restore -> grain match -> upscale (all optional)
                                         │
                                    final image
 ```
@@ -280,8 +280,11 @@ detected-face list plus statistics (right).
    contains, labelled `<file> #<n>`. Click a thumbnail to make it the default
    for every face without an explicit choice; right-click it for *Set as
    default*, *Remove identity* or *Add identity…*. Hover for the full label.
-3. **Quality.** Choose the enhancer (`None`, `GFPGAN 1.4`, Real-ESRGAN x2/x4),
-   keep *Restore mouths from original* on unless you want the swap's own mouth,
+3. **Quality.** Choose the face restoration (`None`, `GFPGAN 1.4`) and an
+   optional frame *Upscale* (`Off`, `2x`, `4x`, or the `1080p`/`1440p`/`4K`
+   presets for 16:9 inputs). *Match input grain* re-applies the original noise
+   on restored faces so they do not look pasted (see `docs/grain_matching.md`).
+   Keep *Restore mouths from original* on unless you want the swap's own mouth,
    and leave *Fast preview* on while composing. Turn it off for the final
    render — patches for both resolutions are cached, so toggling only computes
    what is missing. *Unload models between runs* in Settings frees sessions

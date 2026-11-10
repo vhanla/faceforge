@@ -411,7 +411,7 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     // The expanded Studio panel adds ~250 px of controls plus the shifted Output
     // section, so give the scroll range room for it.
     const bool studio_open = app && app->studio;
-    const float content_bottom = studio_open ? 1270.0f : 810.0f;
+    const float content_bottom = studio_open ? 1298.0f : 838.0f;
     const float max_scroll = std::max(0.0f, content_bottom - (scroll_view_bottom - view_y));
     state->left_scroll = std::clamp(state->left_scroll, 0.0f, max_scroll);
     const float oy = view_y + 12.0f - state->left_scroll;
@@ -513,13 +513,19 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     }
 
     bool restore = app ? app->restore_mouth : true;
+    bool grain = app ? (app->grain_match > 0) : false;
     bool fast = app ? app->fast_preview : true;
     bool unload = app ? app->unload_after_run : false;
     ui_checkbox(a, ctx, x + 24.0f, qy + 75.0f, "Restore mouths from original", &restore, &t);
-    ui_checkbox(a, ctx, x + 24.0f, qy + 103.0f, "Fast preview (downscaled)", &fast, &t);
-    ui_checkbox(a, ctx, x + 24.0f, qy + 131.0f, "Unload models between runs", &unload, &t);
+    ui_checkbox(a, ctx, x + 24.0f, qy + 103.0f, "Match input grain", &grain, &t);
+    ui_checkbox(a, ctx, x + 24.0f, qy + 131.0f, "Fast preview (downscaled)", &fast, &t);
+    ui_checkbox(a, ctx, x + 24.0f, qy + 159.0f, "Unload models between runs", &unload, &t);
     if (app) {
         if (restore != app->restore_mouth) { app->restore_mouth = restore; app->processAll(); }
+        if (grain != (app->grain_match > 0)) {
+            app->grain_match = grain ? 100 : 0;
+            app->processAll();
+        }
         if (fast != app->fast_preview) { app->fast_preview = fast; app->processAll(); }
         if (unload != app->unload_after_run) { app->unload_after_run = unload; app->markConfigDirty(); }
     }
@@ -528,7 +534,7 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     // combo on purpose: restoring faces and enlarging the frame are different
     // operations (see docs/upscaling.md). Presets only appear when they would
     // actually enlarge the input, so the list stays short.
-    const float uy = qy + 168.0f;
+    const float uy = qy + 196.0f;
     ui_text(a, ctx, x + 22.0f, uy + 6.0f, "Upscale", t.text, 13.5f, 2);
     const char* up_labels[8];
     int up_scales[8];
@@ -623,7 +629,7 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     }
 
     // Studio
-    float sy = qy + 250.0f;
+    float sy = qy + 278.0f;
     section_header(a, ctx, t, x, sy, ICON_BOX_FILLED, "Studio");
 
     if (studio_open) {

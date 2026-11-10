@@ -565,6 +565,44 @@ int32_t ff_enhance(ff_engine* engine, const uint8_t* bgr, int32_t width, int32_t
     }
 }
 
+int32_t ff_grain_match(ff_engine* engine, const uint8_t* result_bgr, int32_t result_w,
+                       int32_t result_h, int32_t result_stride, uint8_t* out_bgr,
+                       const uint8_t* reference_bgr, int32_t reference_w, int32_t reference_h,
+                       int32_t reference_stride, const ff_face* faces, int32_t face_count,
+                       int32_t strength, ff_progress_fn cb, void* user_data) {
+    if (!engine || !result_bgr || !out_bgr || !reference_bgr) return FF_ERR_INVALID;
+    if (result_w <= 0 || result_h <= 0 || reference_w <= 0 || reference_h <= 0) {
+        return FF_ERR_INVALID;
+    }
+    if (strength <= 0) {
+        // Nothing to do, but still normalise the output.
+        std::memcpy(out_bgr, result_bgr, static_cast<size_t>(result_w) * result_h * 3);
+        return FF_OK;
+    }
+    std::lock_guard<std::mutex> lock(engine->mu);
+    engine->clear_error();
+    try {
+        cv::Mat result = wrap_bgr(result_bgr, result_w, result_h, result_stride);
+        cv::Mat reference = wrap_bgr(reference_bgr, reference_w, reference_h, reference_stride);
+        std::vector<ff_face> f;
+        if (faces && face_count > 0) f.assign(faces, faces + face_count);
+
+        // out_bgr is documented as tightly packed (stride == width * 3).
+        cv::Mat outimg(result_h, result_w, CV_8UC3, out_bgr);
+        const auto t0 = Clock::now();
+        const int rc =
+            grain_match_faces(*engine, result, reference, f, strength, outimg, cb, user_data);
+        if (rc != FF_OK) return rc;
+        engine->stats.enhance_ms = ms_since(t0);
+        engine->stats.provider = engine->using_cuda ? FF_PROVIDER_CUDA : FF_PROVIDER_CPU;
+        engine->stats.sessions_loaded = static_cast<int32_t>(engine->sessions.size());
+        return FF_OK;
+    } catch (const std::exception& ex) {
+        engine->set_error(std::string("ff_grain_match: ") + ex.what());
+        return FF_ERR_RUNTIME;
+    }
+}
+
 int32_t ff_upscale(ff_engine* engine, const uint8_t* bgr, int32_t width, int32_t height,
                    int32_t stride, int32_t scale, uint8_t** out_bgr, int32_t* out_width,
                    int32_t* out_height, ff_progress_fn cb, void* user_data) {

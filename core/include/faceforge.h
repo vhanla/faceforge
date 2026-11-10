@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define FF_ABI_VERSION 5
+#define FF_ABI_VERSION 6
 
 /* Return codes */
 #define FF_OK 0
@@ -167,6 +167,27 @@ int32_t ff_enhance(ff_engine* engine,
                    const ff_face* faces, int32_t face_count,
                    uint8_t* out_bgr,
                    ff_progress_fn cb, void* user_data);
+
+/* Re-texture face patches with the grain of a pristine reference image.
+ *
+ * GFPGAN and the swapper output smooth faces, so on a grainy source the
+ * restored face looks pasted. This copies the high-frequency residual
+ * (reference - blur) of each face crop in `reference_bgr` onto the matching
+ * face in `result_bgr`, so the texture statistics match the original.
+ *
+ * `faces` are in reference_bgr coordinates; they are scaled if result and
+ * reference dimensions differ. `result_bgr` and `out_bgr` are the same size
+ * (out may alias result only if the caller guarantees it is safe to read after
+ * writing, so pass a separate buffer). `strength` is 0..100 (percent of the
+ * residual); 0 is a no-op. */
+int32_t ff_grain_match(ff_engine* engine,
+                       const uint8_t* result_bgr, int32_t result_w, int32_t result_h,
+                       int32_t result_stride,
+                       uint8_t* out_bgr,
+                       const uint8_t* reference_bgr, int32_t reference_w, int32_t reference_h,
+                       int32_t reference_stride,
+                       const ff_face* faces, int32_t face_count, int32_t strength,
+                       ff_progress_fn cb, void* user_data);
 
 /* Upscale a whole BGR image with Real-ESRGAN at the model's native scale.
  * `scale` must be 2 or 4. The result is tightly packed BGR of size

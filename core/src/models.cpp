@@ -507,6 +507,91 @@ int enhance_gfpgan(Engine& e, const cv::Mat& bgr, const std::vector<ff_face>& fa
 }
 
 // ---------------------------------------------------------------------------
+// Grain matching
+// ---------------------------------------------------------------------------
+
+// Adds the high-frequency residual of `reference` (reference - blur) to a
+// cleaned image of the same size. The residual is clamped so strong structural
+// edges (hair strands, glasses frames, JPEG block edges) do not get re-stamped
+// and only fine grain is transferred. Done per channel, so chromatic sensor
+// noise is preserved and monochrome film grain stays monochrome (its residual
+// is already equal across channels).
+int grain_match_faces(Engine& e, const cv::Mat& result, const cv::Mat& reference,
+                      const std::vector<ff_face>& faces, int strength, cv::Mat& out,
+                      ff_progress_fn cb, void* user) {
+    (void)e;
+    result.copyTo(out);
+    if (faces.empty() || strength <= 0) return FF_OK;
+    const float s = static_cast<float>(strength) / 100.0f;
+    const float sx =
+        reference.cols > 0 ? static_cast<float>(result.cols) / reference.cols : 1.0f;
+    const float sy =
+        reference.rows > 0 ? static_cast<float>(result.rows) / reference.rows : 1.0f;
+
+    // One residual map for the whole reference; it is reused by every face.
+    cv::Mat blurred;
+    cv::GaussianBlur(reference, blurred, cv::Size(0, 0), 1.2);
+    cv::Mat residual;
+    cv::subtract(reference, blurred, residual, cv::noArray(), CV_16S);
+    const int lim = 24;
+
+    for (size_t fi = 0; fi < faces.size(); ++fi) {
+        if (cb) cb(FF_STAGE_ENHANCE, static_cast<float>(fi) / faces.size(), "matching grain",
+                   user);
+        // Work in image space: the swapped face sits where the original face
+        // was, so the reference grain is already aligned pixel for pixel. This
+        // avoids a 512 crop round-trip that would smooth the grain away.
+        const float bx0 = faces[fi].bbox[0] * sx;
+        const float by0 = faces[fi].bbox[1] * sy;
+        const float bx1 = faces[fi].bbox[2] * sx;
+        const float by1 = faces[fi].bbox[3] * sy;
+        // Slight expansion to cover the restored hairline, clipped to bounds.
+        const float mw = (bx1 - bx0) * 0.10f;
+        const float mh = (by1 - by0) * 0.10f;
+        const int x0 = std::max(0, static_cast<int>(std::floor(bx0 - mw)));
+        const int y0 = std::max(0, static_cast<int>(std::floor(by0 - mh)));
+        const int x1 = std::min(out.cols, static_cast<int>(std::ceil(bx1 + mw)));
+        const int y1 = std::min(out.rows, static_cast<int>(std::ceil(by1 + mh)));
+        if (x1 <= x0 || y1 <= y0) continue;
+
+        // Feather the region edges so grain fades into the untouched pixels
+        // (which already carry their own original grain).
+        const float feather =
+            std::max(4.0f, 0.12f * static_cast<float>(std::min(x1 - x0, y1 - y0)));
+
+        for (int y = y0; y < y1; ++y) {
+            uint8_t* o = out.ptr<uint8_t>(y);
+            const int ry = (sy == 1.0f)
+                               ? y
+                               : std::min(residual.rows - 1,
+                                          static_cast<int>(std::lround(y / sy)));
+            const int16_t* r = residual.ptr<int16_t>(ry);
+            const float wy = std::min(1.0f, std::min(y - y0, y1 - 1 - y) / feather);
+            for (int x = x0; x < x1; ++x) {
+                const float wx = std::min(1.0f, std::min(x - x0, x1 - 1 - x) / feather);
+                const float w = std::min(wx, wy);
+                if (w <= 0.0f) continue;
+                const int rx = (sx == 1.0f)
+                                   ? x
+                                   : std::min(residual.cols - 1,
+                                              static_cast<int>(std::lround(x / sx)));
+                const size_t ri = static_cast<size_t>(rx) * 3;
+                const size_t oi = static_cast<size_t>(x) * 3;
+                for (int c = 0; c < 3; ++c) {
+                    int d = static_cast<int>(
+                        std::lround(static_cast<float>(r[ri + c]) * s * w));
+                    d = std::max(-lim, std::min(lim, d));
+                    const int v = static_cast<int>(o[oi + c]) + d;
+                    o[oi + c] = static_cast<uint8_t>(std::max(0, std::min(255, v)));
+                }
+            }
+        }
+    }
+    if (cb) cb(FF_STAGE_ENHANCE, 1.0f, "matching grain", user);
+    return FF_OK;
+}
+
+// ---------------------------------------------------------------------------
 // Real-ESRGAN (whole frame, tiled). upscale_esrgan keeps the model's native
 // output size; enhance_esrgan wraps it and resizes back to the input, which is
 // what the ff_enhance contract wants but is not useful as an upscaler.

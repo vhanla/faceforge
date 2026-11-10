@@ -146,6 +146,13 @@ int enhance_esrgan(Engine& e, const cv::Mat& bgr, int scale, cv::Mat& out,
 int upscale_esrgan(Engine& e, const cv::Mat& bgr, int scale, cv::Mat& out,
                    ff_progress_fn cb, void* user);
 
+// Re-texture the faces in `result` with the high-frequency grain of `reference`
+// (faces are in reference coordinates; scaled if the sizes differ). Backs
+// ff_grain_match.
+int grain_match_faces(Engine& e, const cv::Mat& result, const cv::Mat& reference,
+                      const std::vector<ff_face>& faces, int strength, cv::Mat& out,
+                      ff_progress_fn cb, void* user);
+
 // emap.bin: 512*512 little-endian float32, row-major.
 bool load_emap(const std::string& path, std::vector<float>& emap);
 
