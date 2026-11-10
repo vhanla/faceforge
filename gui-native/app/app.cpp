@@ -786,6 +786,10 @@ void App::replaceBase(ff::Image&& img) {
     base_dirty = true;
     base_gen++;
     clearResult();
+    // The retouch mask belongs to the previous base image. Drop it (and the
+    // blended display copy) so it cannot be applied to the new picture and its
+    // full-resolution buffers are released right away.
+    clearStudio();
     clearPatches();
     freeProc();
     face_count = 0;
