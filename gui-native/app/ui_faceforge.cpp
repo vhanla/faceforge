@@ -494,17 +494,18 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     // Quality
     float qy = oy + 168.0f;
     section_header(a, ctx, t, x, qy, ICON_SLIDERS_FILLED, "Quality");
-    ui_text(a, ctx, x + 22.0f, qy + 38.0f, "Enhancer", t.text, 13.5f, 2);
+    ui_text(a, ctx, x + 22.0f, qy + 38.0f, "Restore", t.text, 13.5f, 2);
 
+    // Face restoration. Real-ESRGAN x2/x4 used to live here too, but the core
+    // resizes its output straight back to the input size, so they added nothing;
+    // a real upscaler is a separate feature (see docs/upscaling.md).
     static const char* kEnhancers[] = {
         "None",
-        "GFPGAN 1.4",
-        "Real-ESRGAN x2",
-        "Real-ESRGAN x4"
+        "GFPGAN 1.4"
     };
     const Rect combo{x + 109.0f, qy + 32.0f, 157.0f, 32.0f};
-    int enhancer_index = app ? static_cast<int>(app->enhancer) : 0;
-    if (ui_combo(a, ctx, combo, kEnhancers, 4, &enhancer_index, &t)) {
+    int enhancer_index = app ? std::clamp(static_cast<int>(app->enhancer), 0, 1) : 0;
+    if (ui_combo(a, ctx, combo, kEnhancers, 2, &enhancer_index, &t)) {
         if (app) {
             app->enhancer = static_cast<app::Enhancer>(enhancer_index);
             app->processAll();
