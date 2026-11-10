@@ -1016,6 +1016,11 @@ bool drag_source_file(Window* window, const uint8_t* png, size_t size) {
 #if defined(__linux__) && defined(AMUIE_HAVE_X11)
     if (!window || !window->handle || !png || size == 0) return false;
     // Materialise the PNG so the drag can offer it as a real file (text/uri-list).
+    // The file must outlive the drag: targets read the URI asynchronously, after
+    // XdndFinished (Firefox loads the page later, Dolphin copies via a KIO job),
+    // so unlinking it before returning makes them fail with ENOENT. Keep only the
+    // latest payload and drop the previous one on the next drag.
+    static std::string last_drag_path;
     char tmpl[] = "/tmp/faceforge-drag-XXXXXX";
     const int fd = mkstemp(tmpl);
     if (fd < 0) return false;
@@ -1027,6 +1032,8 @@ bool drag_source_file(Window* window, const uint8_t* png, size_t size) {
     }
     close(fd);
     const std::string path = tmpl;
+    if (!last_drag_path.empty()) unlink(last_drag_path.c_str());
+    last_drag_path = path;
 
     Display* dpy = XOpenDisplay(nullptr);
     if (!dpy) { unlink(tmpl); return false; }
@@ -1207,9 +1214,7 @@ bool drag_source_file(Window* window, const uint8_t* png, size_t size) {
     XSync(dpy, False);
     XCloseDisplay(dpy);
     XSetErrorHandler(old_handler);
-    // The target has acknowledged the transfer by now, so the temp file is safe
-    // to remove.
-    unlink(tmpl);
+    // Leave the temp file in place: the target may still be reading it.
     return dropped;
 #else
     (void)window;

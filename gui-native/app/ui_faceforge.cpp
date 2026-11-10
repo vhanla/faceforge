@@ -830,56 +830,6 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         }
     }
 
-    // Studio painting: capture mouse state on the canvas, map screen -> base
-    // pixels, and paint into the mask on left drag; right-click toggles the
-    // Erase / Restore brush mode.
-    static bool paint_drag = false;
-    static float paint_last_x = 0.0f;
-    static float paint_last_y = 0.0f;
-    if (studio) {
-        const bool mouse_in = ctx->mouse_x >= canvas.x && ctx->mouse_x <= canvas.x + canvas.w &&
-                              ctx->mouse_y >= canvas.y && ctx->mouse_y <= canvas.y + canvas.h;
-        const bool is_left_down = ctx->mouse_left_down || paint_drag;
-        const bool is_left_released = ctx->mouse_left_released;
-
-        // Toggle brush mode on the right-click edge (not while dragging left).
-        if (ctx->mouse_right_clicked && !paint_drag && mouse_in) {
-            if (app) {
-                app->studio_erase = !app->studio_erase;
-                app->invalidateView();
-            }
-        }
-
-        if (is_left_down && !paint_drag) {
-            paint_drag = true;
-            paint_last_x = 0.0f;
-            paint_last_y = 0.0f;
-        }
-        if (is_left_released && paint_drag) {
-            if (app) app->studioEnd();
-            paint_drag = false;
-            paint_last_x = 0.0f;
-            paint_last_y = 0.0f;
-        }
-        if (paint_drag && app && app->base.valid()) {
-            const float ref_w = static_cast<float>(app->base.width);
-            const float ref_h = static_cast<float>(app->base.height);
-            const float px = (ctx->mouse_x - canvas.x) / canvas.w * ref_w;
-            const float py = (ctx->mouse_y - canvas.y) / canvas.h * ref_h;
-            if (paint_last_x != 0.0f || paint_last_y != 0.0f) {
-                app->studioTo(px, py);
-            } else {
-                app->studioBegin(px, py);
-            }
-            paint_last_x = px;
-            paint_last_y = py;
-        }
-        if (!mouse_in && paint_drag) {
-            if (app) app->studioEnd();
-            paint_drag = false;
-        }
-    }
-
     // In Studio the result texture already carries the retouch blend (the entry
     // point uploads displayImage()), so it is the normal view; "View original"
     // and the top "Original" checkbox swap in the base. Outside Studio the usual
@@ -947,6 +897,59 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         const float ih = ref_h * scale;
         const Rect dst{canvas.x + (canvas.w - iw) * 0.5f + state->pan_x,
                        canvas.y + (canvas.h - ih) * 0.5f + state->pan_y, iw, ih};
+
+        // Studio painting: capture mouse state on the canvas, map screen -> base
+        // pixels, and paint into the mask on left drag; right-click toggles the
+        // Erase / Restore brush mode. The mapping goes through `dst` (the drawn
+        // image rect), not the whole canvas, otherwise strokes land offset by the
+        // letterboxing margins.
+        static bool paint_drag = false;
+        static float paint_last_x = 0.0f;
+        static float paint_last_y = 0.0f;
+        if (studio && dst.w > 0.0f && dst.h > 0.0f) {
+            const bool mouse_in = ctx->mouse_x >= dst.x && ctx->mouse_x <= dst.x + dst.w &&
+                                  ctx->mouse_y >= dst.y && ctx->mouse_y <= dst.y + dst.h;
+            const bool is_left_down = ctx->mouse_left_down || paint_drag;
+            const bool is_left_released = ctx->mouse_left_released;
+
+            // Toggle brush mode on the right-click edge (not while dragging left).
+            if (ctx->mouse_right_clicked && !paint_drag && mouse_in) {
+                if (app) {
+                    app->studio_erase = !app->studio_erase;
+                    app->invalidateView();
+                }
+            }
+
+            if (is_left_down && !paint_drag && mouse_in) {
+                paint_drag = true;
+                paint_last_x = 0.0f;
+                paint_last_y = 0.0f;
+            }
+            if (is_left_released && paint_drag) {
+                if (app) app->studioEnd();
+                paint_drag = false;
+                paint_last_x = 0.0f;
+                paint_last_y = 0.0f;
+            }
+            if (paint_drag && mouse_in && app && app->base.valid()) {
+                const float ref_w = static_cast<float>(app->base.width);
+                const float ref_h = static_cast<float>(app->base.height);
+                const float px = (ctx->mouse_x - dst.x) * (ref_w / dst.w);
+                const float py = (ctx->mouse_y - dst.y) * (ref_h / dst.h);
+                if (paint_last_x != 0.0f || paint_last_y != 0.0f) {
+                    app->studioTo(px, py);
+                } else {
+                    app->studioBegin(px, py);
+                }
+                paint_last_x = px;
+                paint_last_y = py;
+            }
+            if (!mouse_in && paint_drag) {
+                if (app) app->studioEnd();
+                paint_drag = false;
+            }
+        }
+
         // Clip the (possibly zoomed) image and its overlays to the canvas so
         // they never paint over the sidebars.
         ui_clip(a, ctx, canvas);
