@@ -112,3 +112,72 @@ licence before shipping.
    (`providerName() != "cuda"`) and turns red above ~16 MP (e.g. 4x on a 1080p
    input gives 7680x4320, 33 MP). Done. Video upscaling remains (export pass
    only, never the live preview).
+
+## Video upscaling (plan)
+
+Status: not implemented; design only. The photo path is done, the video path is
+the last piece and it has different cost characteristics, so it is kept as a
+deliberate export-only feature.
+
+### Where it goes
+
+The video pipeline already renders one frame at a time and caches the high
+quality frame on disk (`Video::renderExportFrame`, `video.cpp`), then writes
+it through `ff::VideoWriter`. Enhancement (GFPGAN) is applied inside
+`Video::renderFrame` for `VideoQuality::High`. An upscale pass belongs *after*
+that, i.e. on the finished frame and after any Studio-style edit
+(`applyEditToImage`), exactly like the photo path composes first and upscales
+last:
+
+```
+decode -> swap faces -> [GFPGAN] -> [edit mask] -> [Real-ESRGAN] -> writer
+```
+
+`ff_upscale` is reused as-is, so no ABI change. The writer must be opened at the
+upscaled dimensions instead of `video.info().width/height`; the existing
+`if (frame.width != w || frame.height != h) resize` guard then just becomes a
+no-op because frames already match.
+
+### Cache
+
+`renderExportFrame` caches high quality frames at the *source* resolution
+(`framePathInto`). Upscaling each frame on export means the existing cache stays
+valid and reusable; storing upscaled frames would multiply disk use by
+`scale^2` and is not worth it. So: upscale per frame during the export job, do
+not add an upscaled cache.
+
+### Options
+
+One video-specific Upscale combo in the export panel, with the same labels as
+photo (`Off / 2x / 4x`, plus `1080p / 1440p / 4K` only when the clip is 16:9 and
+the preset enlarges it). It is separate from the photo setting so switching
+workspaces does not silently change the other. Keep it out of the live preview:
+playing a 4x preview is unusable; at most offer a one-frame "preview upscale"
+button later.
+
+### Cost
+
+Cost is `frames x per-frame ESRGAN`. Use the same estimate line as photo,
+computed from the clip duration: `1920x1080 -> 4K - 1800 frames - CPU (slow)`.
+Warn (red) above ~16 MP output or when the run is on CPU. This is a genuine
+"walk away" operation; do not hide it behind a spinner.
+
+### Plumbing
+
+- Add `video_upscale_scale` / `video_upscale_target_h` to `App` (or to `Video`),
+  and mirror them into the worker handoff like `job_upscale_*_` in the photo
+  path.
+- Choose the model scale from the target exactly like photo (smallest of x2/x4
+  reaching the target height, then resize to the exact size). Reuse the same
+  helper rather than duplicating the arithmetic.
+- In the export loop (both the chunked and the single-file branches) call
+  `engine.upscale(frame_img, scale, &up)` then, for a preset, resize to the
+  target. Open the writer with the final width/height.
+- Audio muxing and concatenation are unaffected: they run on the finished file.
+
+### Left out on purpose
+
+- No live/video-preview upscaling.
+- No per-frame upscale cache.
+- No `x1` denoise-only model (not downloaded, unproven).
+- No automatic CPU/GPU switch: only the notice, matching photo.
