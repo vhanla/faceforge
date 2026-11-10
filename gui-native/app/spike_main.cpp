@@ -249,9 +249,10 @@ void sync_textures(OpenGL3Backend& backend, app::App& app, UIState& st) {
     }
     if (app.result_dirty) {
         app.result_dirty = false;
-        // In Studio mode the canvas shows the result with the retouch mask
-        // blended in, so upload the display image instead of the raw result.
-        const ff::Image* shown = app.studio ? app.displayImage() : &app.result;
+        // Always show the display image: it is the result with the retouch mask
+        // blended in (or the raw result when nothing is painted). The retouch
+        // must stay visible after Studio is closed, not only while editing.
+        const ff::Image* shown = app.displayImage();
         upload_image(backend, st.result_tex, st.result_tex_w, st.result_tex_h,
                      shown && shown->valid() ? shown : nullptr);
     }

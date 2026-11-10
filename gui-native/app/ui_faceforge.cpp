@@ -637,7 +637,10 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         const Rect close_r{x + 21.0f, sy + 30.0f, b * 0.52f, 36.0f};
         if (ui_button_icon_text(a, ctx, close_r, ICON_X, "Close", t.bg_control, 7.0f, 14.0f,
                                 14.0f, true, tone_control_text(t))) {
-            if (app) { app->studio = false; app->clearStudio(); }
+            // Leaving Studio keeps the retouch: the mask is part of the edit, so
+            // it must stay applied on the canvas and on export. Only the editing
+            // UI (overlay, brush) goes away.
+            if (app) { app->studio = false; app->invalidateView(); }
         }
         const Rect clear_r{x + 21.0f + b * 0.52f, sy + 30.0f, b * 0.46f, 36.0f};
         if (ui_button_icon_text(a, ctx, clear_r, ICON_TRASH, "Clear retouch", t.bg_control, 7.0f,
