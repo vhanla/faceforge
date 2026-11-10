@@ -411,7 +411,7 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     // The expanded Studio panel adds ~250 px of controls plus the shifted Output
     // section, so give the scroll range room for it.
     const bool studio_open = app && app->studio;
-    const float content_bottom = studio_open ? 1360.0f : 900.0f;
+    const float content_bottom = studio_open ? 1180.0f : 720.0f;
     const float max_scroll = std::max(0.0f, content_bottom - (scroll_view_bottom - view_y));
     state->left_scroll = std::clamp(state->left_scroll, 0.0f, max_scroll);
     const float oy = view_y + 12.0f - state->left_scroll;
@@ -523,30 +523,8 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         if (unload != app->unload_after_run) { app->unload_after_run = unload; app->markConfigDirty(); }
     }
 
-    // History
-    float hy = qy + 180.0f;
-    section_header(a, ctx, t, x, hy, ICON_HISTORY_FILLED, "History");
-    if (ui_button_icon_text(a, ctx, Rect{x + 21.0f, hy + 29.0f, 245.0f, 36.0f}, 0, "Apply as input",
-                            t.bg_control, 7.0f, 0.0f, 14.0f, true, tone_control_text(t))) {
-        if (app) app->applyResultAsInput();
-    }
-    if (ui_button_icon_text(a, ctx, Rect{x + 21.0f, hy + 70.0f, 116.0f, 36.0f}, ICON_UNDO, "Undo",
-                            t.bg_control, 7.0f, 13.0f, 13.5f, true, tone_control_text(t), Color{}, 7.0f)) {
-        if (app) app->undoHistory();
-    }
-    if (ui_button_icon_text(a, ctx, Rect{x + 149.0f, hy + 70.0f, 117.0f, 36.0f}, ICON_REDO, "Redo",
-                            t.bg_control, 7.0f, 13.0f, 13.5f, true, tone_control_text(t), Color{}, 7.0f)) {
-        if (app) app->redoHistory();
-    }
-    ui_text(a, ctx, x + 21.0f, hy + 113.0f,
-            arena_fmt(a, "undo %d \xC2\xB7 redo %d", app ? app->undoCount() : 0,
-                      app ? app->redoCount() : 0),
-            t.text_dim, 14.5f);
-
-    ui_separator(a, ctx, x + 16.0f, hy + 146.0f, 250.0f, color_alpha(t.border, 0xb0));
-
     // Studio
-    float sy = hy + 160.0f;
+    float sy = qy + 160.0f;
     section_header(a, ctx, t, x, sy, ICON_BOX_FILLED, "Studio");
 
     if (studio_open) {
@@ -1085,9 +1063,14 @@ void photo_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
     }
 
     const float stats_h = 225.0f;
-    const float stats_y = H - L.status_h - 16.0f - stats_h;
+    const float history_h = 150.0f;
+    const float bottom = H - L.status_h - 16.0f;
+    const float stats_y = bottom - stats_h;
+    // The workspace History lives on the right, above Statistics, so it is never
+    // confused with the Retouch history inside the Studio panel.
+    const float history_y = stats_y - 11.0f - history_h;
     const float card_y = 124.0f;
-    const float card_h = std::max(180.0f, stats_y - 11.0f - card_y);
+    const float card_h = std::max(180.0f, history_y - 11.0f - card_y);
     const float inner_y = card_y + 110.0f;
     const float inner_h = std::max(80.0f, card_y + card_h - 2.0f - inner_y);
 
@@ -1191,6 +1174,31 @@ void photo_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
     }
     // Restore full-screen clip for the statistics card below.
     ui_clip(a, ctx, Rect{0, 0, ctx->screen_w, ctx->screen_h});
+
+    // History (workspace-wide undo/redo and "apply as input").
+    ui_panel(a, ctx, Rect{rx, history_y, w, history_h}, t.bg_panel, t.border, 10.0f);
+    ui_icon(a, ctx, rx + 16.0f, history_y + 14.0f, ICON_HISTORY_FILLED, t.accent, 22.0f);
+    ui_text_bold(a, ctx, rx + 46.0f, history_y + 16.0f, "History", t.text, 15.5f);
+    if (ui_button_icon_text(a, ctx, Rect{rx + 17.0f, history_y + 46.0f, w - 34.0f, 34.0f}, 0,
+                            "Apply as input", t.bg_control, 7.0f, 0.0f, 14.0f, true,
+                            tone_control_text(t))) {
+        if (app) app->applyResultAsInput();
+    }
+    const float hb_w = (w - 34.0f - 8.0f) * 0.5f;
+    if (ui_button_icon_text(a, ctx, Rect{rx + 17.0f, history_y + 88.0f, hb_w, 34.0f}, ICON_UNDO,
+                            "Undo", t.bg_control, 7.0f, 13.0f, 13.0f, true, tone_control_text(t),
+                            Color{}, 7.0f)) {
+        if (app) app->undoHistory();
+    }
+    if (ui_button_icon_text(a, ctx, Rect{rx + 17.0f + hb_w + 8.0f, history_y + 88.0f, hb_w, 34.0f},
+                            ICON_REDO, "Redo", t.bg_control, 7.0f, 13.0f, 13.0f, true,
+                            tone_control_text(t), Color{}, 7.0f)) {
+        if (app) app->redoHistory();
+    }
+    ui_text(a, ctx, rx + 17.0f, history_y + 126.0f,
+            arena_fmt(a, "undo %d  \xC2\xB7  redo %d", app ? app->undoCount() : 0,
+                      app ? app->redoCount() : 0),
+            t.text_dim, 12.5f);
 
     // Statistics
     ui_panel(a, ctx, Rect{rx, stats_y, w, stats_h}, t.bg_panel, t.border, 10.0f);
