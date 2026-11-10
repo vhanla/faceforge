@@ -120,6 +120,11 @@ struct UIState {
     // Set for one frame by the entry point when it wants the Output field to
     // adopt a new default path (e.g. after opening a target).
     bool sync_output_path = false;
+
+    // Statistics panel: process RSS, resampled about once per second (the core
+    // query also touches NVML on CUDA builds, so it is not a per-frame call).
+    float rss_mb = 0.0f;
+    double rss_sample_t = -1.0;
 };
 
 void faceforge_draw(Arena* frame, UIContext* ui, UIState* state);

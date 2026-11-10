@@ -1322,20 +1322,32 @@ void photo_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
     ui_icon(a, ctx, rx + 16.0f, stats_y + 14.0f, ICON_CHART_BARS, t.accent, 27.0f);
     ui_text_bold(a, ctx, rx + 48.0f, stats_y + 18.0f, "Statistics", t.text, 15.0f);
 
-    const char* labels[] = {"detect", "embed", "swap", "enhance", "total"};
+    // Process memory (RSS). Sampled at most once a second: the core call also
+    // queries NVML when present, which is unnecessary work every frame.
+    if (state->rss_sample_t < 0.0 ||
+        static_cast<double>(ctx->time_seconds) - state->rss_sample_t >= 1.0) {
+        state->rss_mb = ff::memoryInfo().rss_mb;
+        state->rss_sample_t = static_cast<double>(ctx->time_seconds);
+    }
+
+    const char* labels[] = {"detect", "embed", "swap", "enhance", "total", "memory"};
     const app::Timings tm = app ? app->lastTimings() : app::Timings{};
     const double vals[] = {tm.detect_ms, tm.embed_ms, tm.swap_ms, tm.enhance_ms, tm.total_ms};
     const Color stat_label = color_mix(t.text, t.text_muted, 0.35f);
-    for (int i = 0; i < 5; ++i) {
-        const float y = stats_y + 51.0f + static_cast<float>(i) * 25.0f;
+    for (int i = 0; i < 6; ++i) {
+        const float y = stats_y + 51.0f + static_cast<float>(i) * 22.0f;
         ui_text_in_rect(a, ctx, Rect{rx + 19.0f, y, 160.0f, 22.0f}, labels[i],
                         stat_label, 13.5f, 2);
-        ui_text_right(a, ctx, Rect{rx + 17.0f, y, 160.0f, 22.0f},
-                      arena_fmt(a, "%.1f ms", vals[i]), t.text, 13.5f, 2);
+        const char* value =
+            i == 5 ? arena_fmt(a, state->rss_mb >= 1024.0f ? "%.1f GB" : "%.0f MB",
+                               state->rss_mb >= 1024.0f ? state->rss_mb / 1024.0f
+                                                        : state->rss_mb)
+                   : arena_fmt(a, "%.1f ms", vals[i]);
+        ui_text_right(a, ctx, Rect{rx + 17.0f, y, 160.0f, 22.0f}, value, t.text, 13.5f, 2);
     }
 
-    ui_separator(a, ctx, rx + 17.0f, stats_y + 181.0f, 160.0f, color_alpha(t.border, 0xa0));
-    ui_text_bold(a, ctx, rx + 17.0f, stats_y + 185.0f,
+    ui_separator(a, ctx, rx + 17.0f, stats_y + 187.0f, 160.0f, color_alpha(t.border, 0xa0));
+    ui_text_bold(a, ctx, rx + 17.0f, stats_y + 191.0f,
                  (app && app->fast_preview) ? "fast preview" : "full resolution",
                  t.accent, 14.1f);
 }
