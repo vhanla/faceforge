@@ -968,21 +968,19 @@ void photo_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
             ui_image(a, ctx, dst, state->mask_tex, Color{0xff, 0xff, 0xff, 0xff});
         }
 
-        // Brush cursor in Studio mode.
+        // Brush cursor in Studio mode: a circle the size of the painted stamp,
+        // centred on the pointer (the stamp itself is centred there), with the
+        // brush diameter in base pixels next to it.
         if (studio) {
             const bool mouse_in = ctx->mouse_x >= dst.x && ctx->mouse_x <= dst.x + dst.w &&
                                   ctx->mouse_y >= dst.y && ctx->mouse_y <= dst.y + dst.h;
             if (mouse_in) {
                 const float brush = app ? app->studio_size : 60.0f;
-                const float half = brush * scale * 0.5f;
-                const float bx = ctx->mouse_x - dst.x;
-                const float by = ctx->mouse_y - dst.y;
-                const float cursor_x = dst.x + bx + half;
-                const float cursor_y = dst.y + by + half;
-                ui_dashed_rect(a, ctx,
-                               Rect{cursor_x - half, cursor_y - half, brush * scale, brush * scale},
-                               app && app->studio_erase ? t.accent : t.on_accent, 2.0f, 1.0f);
-                ui_text(a, ctx, cursor_x + half + 4.0f, cursor_y,
+                const float r = brush * scale;
+                ui_rect_border(a, ctx,
+                               Rect{ctx->mouse_x - r * 0.5f, ctx->mouse_y - r * 0.5f, r, r},
+                               app && app->studio_erase ? t.accent : t.on_accent, r * 0.5f, 1.5f);
+                ui_text(a, ctx, ctx->mouse_x + r * 0.5f + 4.0f, ctx->mouse_y,
                         arena_fmt(a, "%.0f", brush), t.text, 12.0f);
             }
         }
