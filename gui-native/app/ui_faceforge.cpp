@@ -411,7 +411,7 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
     // The expanded Studio panel adds ~250 px of controls plus the shifted Output
     // section, so give the scroll range room for it.
     const bool studio_open = app && app->studio;
-    const float content_bottom = studio_open ? 1235.0f : 775.0f;
+    const float content_bottom = studio_open ? 1270.0f : 810.0f;
     const float max_scroll = std::max(0.0f, content_bottom - (scroll_view_bottom - view_y));
     state->left_scroll = std::clamp(state->left_scroll, 0.0f, max_scroll);
     const float oy = view_y + 12.0f - state->left_scroll;
@@ -584,8 +584,46 @@ void photo_left_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         }
     }
 
+    // Cost and fallback note: one short line instead of a panel of options. It
+    // shows the predicted output size, flags a CPU run (Real-ESRGAN is slow
+    // without CUDA) and turns red when the result is large enough to be
+    // painful (the model cost grows with the number of pixels and tiles).
+    if (app && app->base.valid()) {
+        const bool up_on = app->upscale_scale > 0 || app->upscale_target_h > 0;
+        const int bw = app->base.width;
+        const int bh = app->base.height;
+        if (up_on && bw > 0 && bh > 0) {
+            int ow = 0;
+            int oh = 0;
+            if (app->upscale_target_h > 0) {
+                oh = app->upscale_target_h;
+                ow = static_cast<int>(std::lround(static_cast<double>(oh) * bw / bh));
+            } else {
+                ow = bw * app->upscale_scale;
+                oh = bh * app->upscale_scale;
+            }
+            const double mp = static_cast<double>(ow) * oh / 1e6;
+            const bool cpu = !app->providerName().empty() && app->providerName() != "cuda";
+            const bool huge = static_cast<int64_t>(ow) * oh > 16000000;
+            char tail[48] = "";
+            if (cpu) std::snprintf(tail, sizeof(tail), " \xC2\xB7 CPU (slow)");
+            if (huge) {
+                ui_text(a, ctx, x + 24.0f, uy + 38.0f,
+                        arena_fmt(a, "-> %dx%d (%.1f MP) \xC2\xB7 very large%s", ow, oh, mp,
+                                  tail),
+                        t.danger, 11.5f, 2);
+            } else {
+                ui_text(a, ctx, x + 24.0f, uy + 38.0f,
+                        arena_fmt(a, "-> %dx%d (%.1f MP)%s", ow, oh, mp, tail), t.text_dim,
+                        11.5f, 2);
+            }
+        } else {
+            ui_text(a, ctx, x + 24.0f, uy + 38.0f, "Native size", t.text_dim, 11.5f, 2);
+        }
+    }
+
     // Studio
-    float sy = qy + 215.0f;
+    float sy = qy + 250.0f;
     section_header(a, ctx, t, x, sy, ICON_BOX_FILLED, "Studio");
 
     if (studio_open) {

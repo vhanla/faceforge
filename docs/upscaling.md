@@ -107,5 +107,8 @@ licence before shipping.
    1440p / 4K`, shown only for 16:9 inputs (|AR - 16/9| < 0.02) and only when
    the preset would enlarge the input. A preset picks the smallest model scale
    reaching the target and resizes exactly to it. Done.
-3. **Cost warnings and fallback.** VRAM/pixel estimate, CPU fallback notice,
-   then video.
+3. **Cost warnings and fallback.** A single note under the Upscale combo shows
+   the predicted output size and megapixels, flags a CPU run as slow
+   (`providerName() != "cuda"`) and turns red above ~16 MP (e.g. 4x on a 1080p
+   input gives 7680x4320, 33 MP). Done. Video upscaling remains (export pass
+   only, never the live preview).
