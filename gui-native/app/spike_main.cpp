@@ -268,6 +268,13 @@ void sync_textures(OpenGL3Backend& backend, app::App& app, UIState& st) {
             st.mask_tex = backend.create_texture_rgba(rgba, pw, ph, 4 * pw);
             st.mask_tex_w = pw;
             st.mask_tex_h = ph;
+        } else if (st.mask_tex) {
+            // No mask to preview (e.g. Clear retouch): drop the stale overlay,
+            // otherwise the red paint keeps showing after it was erased.
+            backend.destroy_texture(st.mask_tex);
+            st.mask_tex = 0;
+            st.mask_tex_w = 0;
+            st.mask_tex_h = 0;
         }
     }
 
