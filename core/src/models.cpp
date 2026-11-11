@@ -516,24 +516,42 @@ int enhance_gfpgan(Engine& e, const cv::Mat& bgr, const std::vector<ff_face>& fa
 // and only fine grain is transferred. Done per channel, so chromatic sensor
 // noise is preserved and monochrome film grain stays monochrome (its residual
 // is already equal across channels).
+namespace {
+// Gaussian blur used to split the reference into low + high frequency. The
+// kernel radius matches OpenCV's own choice for an 8-bit image with ksize 0
+// (round(3 * sigma)), so a cropped blur matches a full-frame one for every
+// pixel at least `kGrainRadius` away from the crop edge.
+constexpr float kGrainSigma = 1.2f;
+constexpr int kGrainRadius = 4;
+constexpr int kGrainLimit = 24;
+} // namespace
+
 int grain_match_faces(Engine& e, const cv::Mat& result, const cv::Mat& reference,
                       const std::vector<ff_face>& faces, int strength, cv::Mat& out,
                       ff_progress_fn cb, void* user) {
     (void)e;
-    result.copyTo(out);
+    // In-place updates are supported: every pixel is read from `reference` and
+    // written once to `out`, and the residual comes from a separate crop.
+    const bool in_place = out.data == result.data && out.step == result.step;
+    if (!in_place) result.copyTo(out);
     if (faces.empty() || strength <= 0) return FF_OK;
     const float s = static_cast<float>(strength) / 100.0f;
     const float sx =
         reference.cols > 0 ? static_cast<float>(result.cols) / reference.cols : 1.0f;
     const float sy =
         reference.rows > 0 ? static_cast<float>(result.rows) / reference.rows : 1.0f;
+    const bool unit_scale = sx == 1.0f && sy == 1.0f;
 
-    // One residual map for the whole reference; it is reused by every face.
+    // Reused across faces so a long video does not churn the allocator. Only the
+    // padded face ROI is blurred: the residual is needed inside the face boxes
+    // and nowhere else, which is far cheaper than a full-frame pass on 1080p and
+    // 4K sources. The ROI is grown by the kernel radius so the values we read
+    // are identical to a full-frame blur.
     cv::Mat blurred;
-    cv::GaussianBlur(reference, blurred, cv::Size(0, 0), 1.2);
     cv::Mat residual;
-    cv::subtract(reference, blurred, residual, cv::noArray(), CV_16S);
-    const int lim = 24;
+    cv::Mat crop;
+    std::vector<int> xmap;
+    std::vector<int> col_w;
 
     for (size_t fi = 0; fi < faces.size(); ++fi) {
         if (cb) cb(FF_STAGE_ENHANCE, static_cast<float>(fi) / faces.size(), "matching grain",
@@ -541,48 +559,106 @@ int grain_match_faces(Engine& e, const cv::Mat& result, const cv::Mat& reference
         // Work in image space: the swapped face sits where the original face
         // was, so the reference grain is already aligned pixel for pixel. This
         // avoids a 512 crop round-trip that would smooth the grain away.
-        const float bx0 = faces[fi].bbox[0] * sx;
-        const float by0 = faces[fi].bbox[1] * sy;
-        const float bx1 = faces[fi].bbox[2] * sx;
-        const float by1 = faces[fi].bbox[3] * sy;
-        // Slight expansion to cover the restored hairline, clipped to bounds.
+        // Bboxes are in reference coordinates; expand 10% to cover the restored
+        // hairline and clip to the frame.
+        const float bx0 = std::max(0.0f, faces[fi].bbox[0]);
+        const float by0 = std::max(0.0f, faces[fi].bbox[1]);
+        const float bx1 = std::min(static_cast<float>(reference.cols), faces[fi].bbox[2]);
+        const float by1 = std::min(static_cast<float>(reference.rows), faces[fi].bbox[3]);
+        if (bx1 <= bx0 || by1 <= by0) continue;
         const float mw = (bx1 - bx0) * 0.10f;
         const float mh = (by1 - by0) * 0.10f;
-        const int x0 = std::max(0, static_cast<int>(std::floor(bx0 - mw)));
-        const int y0 = std::max(0, static_cast<int>(std::floor(by0 - mh)));
-        const int x1 = std::min(out.cols, static_cast<int>(std::ceil(bx1 + mw)));
-        const int y1 = std::min(out.rows, static_cast<int>(std::ceil(by1 + mh)));
+
+        // Reference ROI: padded face box plus the blur support.
+        const int rx0 = std::max(0, static_cast<int>(std::floor(bx0 - mw)) - kGrainRadius);
+        const int ry0 = std::max(0, static_cast<int>(std::floor(by0 - mh)) - kGrainRadius);
+        const int rx1 = std::min(reference.cols,
+                                 static_cast<int>(std::ceil(bx1 + mw)) + kGrainRadius);
+        const int ry1 = std::min(reference.rows,
+                                 static_cast<int>(std::ceil(by1 + mh)) + kGrainRadius);
+        if (rx1 <= rx0 || ry1 <= ry0) continue;
+
+        const cv::Rect roi(rx0, ry0, rx1 - rx0, ry1 - ry0);
+        // A contiguous crop takes OpenCV's vectorised Gaussian path (a strided
+        // ROI falls back to a slower one). copyTo reuses `crop` between faces.
+        reference(roi).copyTo(crop);
+        cv::GaussianBlur(crop, blurred, cv::Size(0, 0), kGrainSigma);
+        cv::subtract(crop, blurred, residual, cv::noArray(), CV_16S);
+
+        // Output box: same box scaled into result coordinates.
+        const int x0 = std::max(0, static_cast<int>(std::floor((bx0 - mw) * sx)));
+        const int y0 = std::max(0, static_cast<int>(std::floor((by0 - mh) * sy)));
+        const int x1 = std::min(result.cols, static_cast<int>(std::ceil((bx1 + mw) * sx)));
+        const int y1 = std::min(result.rows, static_cast<int>(std::ceil((by1 + mh) * sy)));
         if (x1 <= x0 || y1 <= y0) continue;
 
         // Feather the region edges so grain fades into the untouched pixels
         // (which already carry their own original grain).
         const float feather =
             std::max(4.0f, 0.12f * static_cast<float>(std::min(x1 - x0, y1 - y0)));
+        const float inv_feather = 1.0f / feather;
 
-        for (int y = y0; y < y1; ++y) {
-            uint8_t* o = out.ptr<uint8_t>(y);
-            const int ry = (sy == 1.0f)
-                               ? y
-                               : std::min(residual.rows - 1,
-                                          static_cast<int>(std::lround(y / sy)));
-            const int16_t* r = residual.ptr<int16_t>(ry);
-            const float wy = std::min(1.0f, std::min(y - y0, y1 - 1 - y) / feather);
-            for (int x = x0; x < x1; ++x) {
-                const float wx = std::min(1.0f, std::min(x - x0, x1 - 1 - x) / feather);
-                const float w = std::min(wx, wy);
-                if (w <= 0.0f) continue;
-                const int rx = (sx == 1.0f)
-                                   ? x
-                                   : std::min(residual.cols - 1,
-                                              static_cast<int>(std::lround(x / sx)));
-                const size_t ri = static_cast<size_t>(rx) * 3;
-                const size_t oi = static_cast<size_t>(x) * 3;
-                for (int c = 0; c < 3; ++c) {
-                    int d = static_cast<int>(
-                        std::lround(static_cast<float>(r[ri + c]) * s * w));
-                    d = std::max(-lim, std::min(lim, d));
-                    const int v = static_cast<int>(o[oi + c]) + d;
-                    o[oi + c] = static_cast<uint8_t>(std::max(0, std::min(255, v)));
+        // Column mapping for the scaled case; the common unit-scale path reads
+        // the residual row directly. The x weights are precomputed once per face
+        // so the hot loop only does an integer min per pixel.
+        col_w.resize(static_cast<size_t>(x1 - x0));
+        if (!unit_scale) xmap.resize(static_cast<size_t>(x1 - x0));
+        for (int x = x0; x < x1; ++x) {
+            const float wx = std::min(
+                1.0f, static_cast<float>(std::min(x - x0, x1 - 1 - x)) * inv_feather);
+            col_w[static_cast<size_t>(x - x0)] =
+                static_cast<int>(std::lround(s * wx * 256.0f));
+            if (!unit_scale) {
+                int rx = static_cast<int>(std::lround(static_cast<float>(x) / sx));
+                rx = std::clamp(rx, rx0, rx1 - 1);
+                xmap[static_cast<size_t>(x - x0)] = rx - rx0;
+            }
+        }
+
+        if (unit_scale) {
+            for (int y = y0; y < y1; ++y) {
+                const int16_t* r = residual.ptr<int16_t>(y - ry0);
+                uint8_t* o = out.ptr<uint8_t>(y);
+                const float wy = std::min(
+                    1.0f, static_cast<float>(std::min(y - y0, y1 - 1 - y)) * inv_feather);
+                const int row_w = static_cast<int>(std::lround(s * wy * 256.0f));
+                if (row_w <= 0) continue;
+                for (int x = x0; x < x1; ++x) {
+                    const int sw = std::min(col_w[static_cast<size_t>(x - x0)], row_w);
+                    if (sw == 0) continue;
+                    const size_t ri = static_cast<size_t>(x - rx0) * 3;
+                    const size_t oi = static_cast<size_t>(x) * 3;
+                    for (int c = 0; c < 3; ++c) {
+                        const int v = static_cast<int>(r[ri + c]) * sw;
+                        int d = v >= 0 ? (v + 128) >> 8 : -((128 - v) >> 8);
+                        d = std::max(-kGrainLimit, std::min(kGrainLimit, d));
+                        const int q = static_cast<int>(o[oi + c]) + d;
+                        o[oi + c] = static_cast<uint8_t>(std::max(0, std::min(255, q)));
+                    }
+                }
+            }
+        } else {
+            for (int y = y0; y < y1; ++y) {
+                int ry = static_cast<int>(std::lround(static_cast<float>(y) / sy));
+                ry = std::clamp(ry, ry0, ry1 - 1);
+                const int16_t* r = residual.ptr<int16_t>(ry - ry0);
+                uint8_t* o = out.ptr<uint8_t>(y);
+                const float wy = std::min(
+                    1.0f, static_cast<float>(std::min(y - y0, y1 - 1 - y)) * inv_feather);
+                const int row_w = static_cast<int>(std::lround(s * wy * 256.0f));
+                if (row_w <= 0) continue;
+                for (int x = x0; x < x1; ++x) {
+                    const int sw = std::min(col_w[static_cast<size_t>(x - x0)], row_w);
+                    if (sw == 0) continue;
+                    const size_t ri = static_cast<size_t>(xmap[static_cast<size_t>(x - x0)]) * 3;
+                    const size_t oi = static_cast<size_t>(x) * 3;
+                    for (int c = 0; c < 3; ++c) {
+                        const int v = static_cast<int>(r[ri + c]) * sw;
+                        int d = v >= 0 ? (v + 128) >> 8 : -((128 - v) >> 8);
+                        d = std::max(-kGrainLimit, std::min(kGrainLimit, d));
+                        const int q = static_cast<int>(o[oi + c]) + d;
+                        o[oi + c] = static_cast<uint8_t>(std::max(0, std::min(255, q)));
+                    }
                 }
             }
         }

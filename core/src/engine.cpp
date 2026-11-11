@@ -576,7 +576,9 @@ int32_t ff_grain_match(ff_engine* engine, const uint8_t* result_bgr, int32_t res
     }
     if (strength <= 0) {
         // Nothing to do, but still normalise the output.
-        std::memcpy(out_bgr, result_bgr, static_cast<size_t>(result_w) * result_h * 3);
+        if (out_bgr != result_bgr) {
+            std::memcpy(out_bgr, result_bgr, static_cast<size_t>(result_w) * result_h * 3);
+        }
         return FF_OK;
     }
     std::lock_guard<std::mutex> lock(engine->mu);

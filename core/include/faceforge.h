@@ -176,10 +176,11 @@ int32_t ff_enhance(ff_engine* engine,
  * face in `result_bgr`, so the texture statistics match the original.
  *
  * `faces` are in reference_bgr coordinates; they are scaled if result and
- * reference dimensions differ. `result_bgr` and `out_bgr` are the same size
- * (out may alias result only if the caller guarantees it is safe to read after
- * writing, so pass a separate buffer). `strength` is 0..100 (percent of the
- * residual); 0 is a no-op. */
+ * reference dimensions differ. `result_bgr` and `out_bgr` are the same size.
+ * `out_bgr` may alias `result_bgr` when both are tightly packed (out stride ==
+ * result stride == width * 3): the pass then updates the pixels in place and
+ * skips the full-frame copy. `strength` is 0..100 (percent of the residual);
+ * 0 is a no-op. */
 int32_t ff_grain_match(ff_engine* engine,
                        const uint8_t* result_bgr, int32_t result_w, int32_t result_h,
                        int32_t result_stride,
