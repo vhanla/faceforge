@@ -26,9 +26,9 @@ swap -> GFPGAN -> [grain match] -> [upscale]
 
 ## Algorithm
 
-The reference and the result are the same size and the face sits at the same
-place (the swap does not move it), so this works directly in image space with no
-crop round-trip (a 512 crop would smooth the grain away):
+The reference and the result are normally the same size and the face sits at the
+same place (the swap does not move it), so this works directly in image space
+with no crop round-trip (a 512 crop would smooth the grain away):
 
 1. `residual = reference - GaussianBlur(reference, sigma=1.2)`, per channel, in
    `int16`. This is the zero-mean high-frequency part.
@@ -37,6 +37,14 @@ crop round-trip (a 512 crop would smooth the grain away):
 4. Feather the box edges (linear over ~12% of the shorter side) so grain fades
    into the untouched pixels, which already carry their own grain.
 5. Clamp to 0..255.
+
+Only the padded face ROI is blurred, not the whole frame: the residual is
+needed inside the face boxes and nowhere else. The ROI is grown by the Gaussian
+kernel radius (4 px for sigma 1.2) so its interior is identical to a
+full-frame blur, then copied into a contiguous buffer so OpenCV takes its
+vectorized path. The kernel is reused across faces and frames. The output may
+alias the result buffer, so a video frame is updated in place instead of
+allocating and copying a second full frame.
 
 The clamp drops strong structural edges (hair strands, glasses frames, JPEG
 block edges) so they are not re-stamped from the old face onto the new one. The
@@ -56,7 +64,25 @@ that maps to 100.
   active faces in processing coordinates.
 - Video: `Video::renderFrame()` calls it for high quality (export) only, using
   the pristine decoded frame as the reference. Low-quality preview frames skip
-  it.
+  it. Video has its own `Match input grain` toggle in *Process & cache*, so the
+  photo checkbox never silently changes a clip; the choice is part of the cache
+  signature, so toggling it re-renders cached high-quality frames. The pass
+  writes into the frame already being assembled, with no extra full-frame
+  buffer.
+
+## Cost
+
+Measured on the reference machine (4-core i5-4590, CPU, 6 large faces):
+
+| Frame | Before (full-frame blur + copy) | After (face ROI + in place) |
+| ----- | ------------------------------- | --------------------------- |
+| 1080p | ~31 ms | ~16 ms |
+| 4K    | ~122 ms | ~56 ms |
+
+That is 2-2.5x faster, and it runs once per high-quality frame while the swap
+and GFPGAN take seconds per frame on CPU. It is not threaded on purpose:
+inference already saturates the four cores, and spreading a 10-50 ms memory
+pass over the same cores would add contention rather than reduce wall time.
 
 ## Notes and limits
 

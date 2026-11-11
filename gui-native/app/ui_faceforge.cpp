@@ -2121,7 +2121,7 @@ void video_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
 
     // The right sidebar carries the identity library, cache, process and export
     // sections; allow scrolling when they do not fit.
-    const float content_h = 1180.0f;
+    const float content_h = 1206.0f;
     const float max_scroll = std::max(0.0f, content_h - (view_bottom - view_y));
     state->video_right_scroll = std::clamp(state->video_right_scroll, 0.0f, max_scroll);
     ui_clip(a, ctx, Rect{rx, view_y, w, view_bottom - view_y});
@@ -2232,6 +2232,14 @@ void video_right_sidebar(Arena* a, UIContext* ctx, UIState* state, const Layout&
             v->default_skip = dskip;
             v->selectSegmentAt(v->cur);
         }
+    }
+    cur_y += 28.0f;
+    {
+        bool grain = v->grain_match;
+        if (ui_checkbox(a, ctx, rx + 16.0f, cur_y, "Match input grain", &grain, &t)) {
+            v->grain_match = grain;
+        }
+        ui_text(a, ctx, rx + 160.0f, cur_y + 3.0f, "full res only", t.text_dim, 11.5f);
     }
     cur_y += 28.0f;
     if (v->low_quality) {

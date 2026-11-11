@@ -251,6 +251,9 @@ public:
     bool process_use_cache = true;
     bool default_skip = false;
     bool enhancer_failed = false;
+    // Independent from the photo "Match input grain" setting: a photo retouch
+    // choice must not silently change how a clip is rendered. Full quality only.
+    bool grain_match = false;
 
     int sel_seg = -1;
     int32_t seg_ids[kVideoMaxFaces];

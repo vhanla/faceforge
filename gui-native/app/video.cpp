@@ -848,6 +848,11 @@ uint64_t Video::cacheSig() const {
     h.val(enh);
     const bool mouth = host_ ? host_->restore_mouth : true;
     h.val(mouth);
+    // Grain matching changes the rendered pixels of high-quality frames, so it
+    // must invalidate cached frames when toggled. Video owns its own setting;
+    // it never inherits the photo checkbox.
+    const int grain = grain_match ? 100 : 0;
+    h.val(grain);
     const bool dskip = default_skip;
     h.val(dskip);
     {
@@ -1811,14 +1816,13 @@ Video::RenderResult Video::renderFrame(ff::Engine& engine, const ff::Image& src,
 
     // Match the pristine frame's grain on the restored faces so a smoothed
     // GFPGAN / swapper face blends into a noisy or compressed clip. High quality
-    // (export) only.
+    // (export) only. The pass updates `cur` in place: the core reads the
+    // pristine `work` frame for the residual, so no third full-frame buffer or
+    // copy is needed.
     if (quality == VideoQuality::High && act_n > 0 && job_grain_match_ > 0) {
         ff::Image ref = ff::Image::borrow(work->data, W, H, work->stride);
-        std::vector<uint8_t> gbuf(bytes);
-        ff::Image gm = ff::Image::borrow(gbuf.data(), W, H, W * 3);
-        if (engine.grainMatch(cur, ref, act_faces, act_n, job_grain_match_, &gm)) {
-            std::memcpy(cur.data, gbuf.data(), bytes);
-        }
+        // Grain is cosmetic; a failure keeps the un-grained frame.
+        (void)engine.grainMatch(cur, ref, act_faces, act_n, job_grain_match_, &cur);
     }
 
     ff::Image packed = ff::Image::borrow(cur.data, W, H, W * 3);
@@ -1918,7 +1922,7 @@ bool Video::spawn(VideoJob kind) {
     err.clear();
     enhancer_failed = false;
     job_enhancer_ = host_ ? static_cast<int>(host_->enhancer) : 0;
-    job_grain_match_ = host_ ? host_->grain_match : 0;
+    job_grain_match_ = grain_match ? 100 : 0;
     job_restore_mouth_ = host_ ? host_->restore_mouth : true;
 
     host_->setVideoBusy(true);

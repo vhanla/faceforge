@@ -505,12 +505,17 @@ switching back to `Photo` leaves that work untouched.
    stored as frame ranges, so they survive re-analysis.
 5. **Process & cache.** `Process frame`, `Process sequence` or `Process current
    chunk` render the swap with the current assignments. `Restore mouths` applies
-   the photo editor's mouth restoration to the swapped faces. `Low quality`
-   works on a 640 px-long-side clone and **never runs the enhancer** (fast
-   previews); `High quality` runs the swap at the source resolution and uses the
-   chosen enhancer. A line under the checkboxes states what will happen for the
-   current clip (for example `Fast 640 px pass · enhancer off`,
-   `Full res · enhancer on (GFPGAN, 4096 MB)` or
+   the photo editor's mouth restoration to the swapped faces. `Match input grain`
+   re-applies the clip's original texture on the restored faces; it is a
+   separate video setting (the photo checkbox does not affect it), applies to
+   high quality only, and toggling it invalidates cached frames. Blurring is
+   limited to the padded face regions and the pass runs in place, so it adds
+   roughly 16 ms at 1080p and 56 ms at 4K per frame instead of 31/122 ms.
+   `Low quality` works on a 640 px-long-side clone and **never runs the
+   enhancer** (fast previews); `High quality` runs the swap at the source
+   resolution and uses the chosen enhancer. A line under the checkboxes states
+   what will happen for the current clip (for example `Fast 640 px pass ·
+   enhancer off`, `Full res · enhancer on (GFPGAN, 4096 MB)` or
    `Full res · enhancer failed, disabled for this clip`). GFPGAN works on each
    face's 512×512 crop, so memory does not grow with frame size and high quality
    attempts the enhancer even on large frames and small GPUs. If a crop really
