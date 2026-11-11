@@ -1,9 +1,8 @@
 # gui-native
 
-Native C++ UI for FaceForge, replacing the Zig + DVUI desktop app. The goal of
-this branch (`arenaui`) is to drive the unchanged C core
-(`core/include/faceforge.h`) from a lightweight, arena-based immediate-mode UI
-instead of Zig.
+Native C++ UI for FaceForge. It drives the unchanged C core
+(`core/include/faceforge.h`) from a lightweight, arena-based immediate-mode UI.
+The earlier Zig + DVUI desktop app is archived on the `legacy-zig` branch.
 
 ```
 gui-native/
@@ -17,16 +16,16 @@ gui-native/
                   worker thread, settings, C ABI wrappers) and the AMUIE
                   screen that drives it, plus the entry point
   CMakeLists.txt  builds `amuie`, `faceforge-app`, `faceforge-ui`,
-                  `faceforge-spike` and the test binary
+                  `faceforge-gui` and the test binary
 ```
 
 `amuie/main.cpp` is the upstream library's demo entry point (kept for
 reference); it is not compiled here. `UPSTREAM_CMakeLists.txt` is the library's
 original build file.
 
-The app layer is deliberately UI-agnostic and mirrors `gui/src/*.zig`: it owns
-the engine, the pristine base image, the identity library, the per-face swap
-patch cache, the composed result and the undo/redo history, and runs all
+The app layer is deliberately UI-agnostic and mirrors the retired Zig UI: it
+owns the engine, the pristine base image, the identity library, the per-face
+swap patch cache, the composed result and the undo/redo history, and runs all
 inference on one background thread. The video workspace lives in `app::Video`
 (`app/video.*`): it owns the timeline, analysis data, frame caches, project
 file and export jobs, borrowing the engine and identity library from
@@ -36,7 +35,7 @@ app layer directly and `amuie/` stays pristine.
 
 ## Entry point
 
-`app/spike_main.cpp` builds `app::App`, `app::Video` and the screen, then runs
+`app/main.cpp` builds `app::App`, `app::Video` and the screen, then runs
 the frame loop. Beyond rendering, it owns texture lifetime: it uploads and
 destroys the base, result, face-thumbnail, identity-thumbnail and video-frame
 textures as the app's dirty flags and generations change. It also feeds the
@@ -56,12 +55,12 @@ Run from the repository root so the default `assets/...` and `models` paths
 resolve:
 
 ```bash
-./build-native/faceforge-spike
+./build-native/faceforge-gui
 # headless capture (writes a PPM; convert with ImageMagick if needed):
-./build-native/faceforge-spike --screenshot /tmp/spike.ppm --frames 5 --wait
-./build-native/faceforge-spike --identity assets/source_messi.jpg
+./build-native/faceforge-gui --screenshot /tmp/faceforge.ppm --frames 5 --wait
+./build-native/faceforge-gui --identity assets/source_messi.jpg
 # video workspace, optionally opening a clip:
-./build-native/faceforge-spike --video [PATH]
+./build-native/faceforge-gui --video [PATH]
 ```
 
 `--help` lists the full flag set: `--target`, `--identity` (repeatable or a
@@ -73,7 +72,7 @@ resolve:
 runs; `FACEFORGE_VIDEOTEST=clip.mp4` runs the scripted analysis/process/export/
 playback check (`FACEFORGE_VIDEOTEST_KEEP=1` keeps the window up afterwards).
 Without `--identity` or `FACEFORGE_IDENTITY`, `assets/source_lena.jpg` is the
-default identity, matching the Zig GUI.
+default identity, matching the legacy UI.
 
 The photo Studio reuses the existing result: open it from the left sidebar, then
 left-drag on the canvas to paint the original back over the result and

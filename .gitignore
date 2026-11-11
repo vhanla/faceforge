@@ -2,11 +2,7 @@
 /build/
 /build-native/
 /dist/
-/zig-out/
-/.zig-cache/
 /.cache/
-/zig-cache/
-/zig-pkg/
 /vcpkg_installed/
 /.vs/
 

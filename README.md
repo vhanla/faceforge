@@ -1,7 +1,7 @@
 # FaceForge
 
 Native face restoration and face swapping for **Linux and Windows**, built
-around **ONNX Runtime** and **OpenCV** with a **Zig + DVUI** desktop UI. No
+around **ONNX Runtime** and **OpenCV** with a **native C++** desktop UI. No
 webview, no Python at runtime, no cloud calls.
 
 The application detects faces, extracts an identity embedding, swaps every
@@ -111,35 +111,40 @@ faceforge/
 │       ├── ort_session.cpp     ORT sessions + CUDA provider options
 │       ├── video.cpp           on-demand decode, ffmpeg encode/concat/mux
 │       └── internal.hpp
-├── gui/src/
-│   ├── main.zig                DVUI application
-│   ├── video.zig               video workspace (timeline, analysis, export)
-│   ├── config.zig              persisted settings (JSON) and version helpers
-│   ├── update.zig              background GitHub release checks
-│   └── ff.zig                  Zig wrappers over the C ABI
+├── gui-native/
+│   ├── app/                    native app layer + faceforge screen
+│   │   ├── app.cpp             photo pipeline, patches, undo, settings
+│   │   ├── video.cpp           video workspace (timeline, analysis, export)
+│   │   ├── config.cpp          persisted settings (JSON) and version helpers
+│   │   ├── ff.cpp              C ABI wrappers
+│   │   ├── main.cpp            window, frame loop, textures
+│   │   └── ui_faceforge.cpp    immediate-mode screens
+│   ├── amuie/                  vendored AMUIE library (widgets, GLFW, OpenGL)
+│   └── amuie-tests/            headless widget tests
 ├── bench/bench_main.cpp        benchmark CLI (also writes CSV)
 ├── bench/results/              generated measurements and images
 ├── scripts/
 │   ├── fetch_deps.sh/.ps1      ONNX Runtime SDK
 │   ├── fetch_models.sh/.ps1    weights + emap.bin
-│   ├── build.sh/.ps1           CMake core + zig GUI
+│   ├── build.sh/.ps1           CMake core + native GUI
 │   ├── run_bench.sh/.ps1       benchmark matrix
 │   ├── bench_to_md.py          CSV → Markdown
 │   ├── extract_emap.py         inswapper emap initializer
 │   └── verify_parity.py        numerical check vs. InsightFace
 ├── packaging/                  .deb, AppImage and Inno Setup packaging
 ├── assets/                     small sample images (testing only)
-├── docs/                       screenshots used by this README
+├── docs/                       screenshots + design notes
 ├── CHANGELOG.md                release notes (Keep a Changelog)
 ├── models/                     weights (git-ignored)
 ├── third_party/                ONNX Runtime SDK (git-ignored)
 ├── .github/workflows/ci.yml    Linux + Windows builds
 ├── .github/workflows/release.yml  release packages (tag or manual)
 ├── vcpkg.json                  OpenCV manifest (Windows)
-├── CMakeLists.txt
-├── build.zig
-└── build.zig.zon
+└── CMakeLists.txt              core; gui-native/CMakeLists.txt builds the UI
 ```
+
+The earlier Zig + DVUI desktop UI is archived on the `legacy-zig` branch. `main`
+ships only the native C++ UI.
 
 ## Requirements
 
@@ -148,13 +153,13 @@ Tested on Linux with:
 | Component | Version |
 |---|---|
 | CMake | 4.4 |
-| C++ compiler | GCC 15 (C++17) |
+| C++ compiler | GCC 15 (C++17 core, C++20 UI) |
 | OpenCV | 5.0 (4.x also supported) |
 | ONNX Runtime | 1.31.1, `gpu_cuda13` build |
 | CUDA | 13.4 |
 | cuDNN | 9.27 |
-| Zig | 0.17.0 |
-| SDL3 | 3.4 (fetched by DVUI) |
+| GLFW | 3.3+ (3.4 is fetched when missing) |
+| OpenGL | 3.3 core |
 | FFmpeg | any recent build, `ffmpeg` on `PATH` (video export) |
 | GPU | NVIDIA GTX 1650, 4 GB |
 
@@ -172,20 +177,24 @@ Both platforms share the same C++ core. The only OS-specific code is memory and
 time introspection: `ff_memory_info` uses `GetProcessMemoryInfo`/PSAPI on
 Windows and `/proc/self/statm` on Linux, while NVML is loaded dynamically from
 `nvml.dll` or `libnvidia-ml.so.1`. Timestamps go through `ff_now_ns` in the
-core, so the Zig GUI has no platform-specific clock code.
+core, so the GUI has no platform-specific clock code.
 
 Model and image paths are opened with `std::filesystem::u8path` and
 `cv::imdecode`/`cv::imencode`, so folders and filenames with accents or other
 non-ASCII characters work on Windows. `windows.h` is included with `NOMINMAX`
-to keep `std::min`/`std::max` intact. On Windows the build copies
-`faceforge.dll`, the ONNX Runtime provider DLLs and the OpenCV runtime DLL next
-to the executables, so `zig-out\bin` is self-contained.
+to keep `std::min`/`std::max` intact. On Windows the core build copies
+`faceforge.dll`, the ONNX Runtime provider DLLs and the OpenCV runtime DLLs next
+to the executables, and the GUI target copies them into `build-native`, so that
+directory is self-contained.
 
 ## Quick start
 
 ### Linux
 
 ```bash
+# 0. GUI dependencies (Debian/Ubuntu): GLFW + OpenGL/X11 headers
+#    sudo apt-get install libglfw3-dev libgl1-mesa-dev libx11-dev
+
 # 1. ONNX Runtime SDK (~245 MB)
 scripts/fetch_deps.sh
 
@@ -197,7 +206,7 @@ scripts/fetch_models.sh
 scripts/build.sh
 
 # 4. run the GUI from the project root (paths are relative to it)
-./zig-out/bin/faceforge-gui
+./build-native/faceforge-gui
 ```
 
 ### Windows (PowerShell)
@@ -214,17 +223,16 @@ scripts/build.sh
 .\scripts\build.ps1
 
 # 4. run the GUI from the project root (paths are relative to it)
-.\zig-out\bin\faceforge-gui.exe
+.\build-native\faceforge-gui.exe
 ```
 
 OpenCV is resolved in this order on Windows: `-OpenCVDir <path>` (folder with
 `OpenCVConfig.cmake`), then vcpkg when `VCPKG_ROOT` / `VCPKG_INSTALLATION_ROOT`
-is set (see `vcpkg.json`), then whatever CMake can find. `build.ps1` and
-`build.zig` both honor the `OpenCV_DIR` environment variable. The ONNX Runtime
-DLLs are copied next to the executables, so the build is runnable from
-`zig-out\bin`.
+is set (see `vcpkg.json`), then whatever CMake can find. `build.ps1` honors
+the `OpenCV_DIR` environment variable. The ONNX Runtime DLLs are copied next to
+the executables, so the build is runnable from `build-native\`.
 
-`FACEFORGE_AUTORUN=1 ./zig-out/bin/faceforge-gui` runs the whole pipeline once
+`FACEFORGE_AUTORUN=1 ./build-native/faceforge-gui` runs the whole pipeline once
 with the default images and saves the result to
 `bench/results/gui_result.png`. This is handy for smoke tests and for
 generating screenshots without clicking. Two more variables make that run
@@ -245,7 +253,7 @@ the two-identity path.
 
 ```bash
 scripts/build.sh --core      # C++ core + ffbench only
-scripts/build.sh --gui       # Zig GUI only (core must exist)
+scripts/build.sh --gui       # native GUI only (core must exist)
 JOBS=8 scripts/build.sh      # parallel build
 ```
 
@@ -255,10 +263,15 @@ JOBS=8 scripts/build.sh      # parallel build
 .\scripts\build.ps1 -OpenCVDir C:\opencv\build -Jobs 8
 ```
 
-`zig build` also drives CMake, so a plain `zig build` produces both the core
-and the GUI. `zig build run` launches the app.
-`zig build -Dversion=0.2.0` stamps the version shown in About and used by the
-update checker; the release workflow derives it from the git tag.
+The repository has two CMake projects: the root one builds the C++ core and the
+benchmarks, and `gui-native/` builds the UI against the core's artifacts. The
+scripts run both in order; to do it by hand:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+cmake -S gui-native -B build-native -DCMAKE_BUILD_TYPE=Release
+cmake --build build-native -j
+```
 
 Release packages stay generic on purpose. Hot loops detect AVX2/FMA at runtime
 and fall back to scalar code otherwise. For a local build tuned to your own
@@ -459,10 +472,10 @@ install directory.
 
 Push a tag like `v0.2.0` to publish, or run the workflow manually with a
 version and *publish* enabled to release on demand. An existing release for the
-same tag is never overwritten unless *overwrite* is enabled. The tag is passed
-to `zig build -Dversion=...`, so About and the update checker report the same
-version. Release notes come from the matching section of `CHANGELOG.md`
-(`scripts/changelog.py notes <version>`) and fall back to `git log` when there
+same tag is never overwritten unless *overwrite* is enabled. The version names
+the release and the package files. Release notes come from the matching section
+of `CHANGELOG.md` (`scripts/changelog.py notes <version>`) and fall back to
+`git log` when there
 is no entry. Model weights are never included — the packages ship
 `fetch_models.sh` / `fetch_models.ps1`.
 

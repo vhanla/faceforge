@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Build the portable Windows zip from an existing zig-out\bin.
+    Build the portable Windows zip from an existing build-native directory.
 
 .EXAMPLE
     .\packaging\windows\build_portable.ps1 -Version 0.2.0
@@ -14,13 +14,13 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$bin = Join-Path $root "zig-out\bin"
+$bin = Join-Path $root "build-native"
 $dist = Join-Path $root "dist"
 $pkg = "faceforge-$Version-windows-x64"
 $stage = Join-Path $dist $pkg
 
 if (-not (Test-Path (Join-Path $bin "faceforge-gui.exe"))) {
-    throw "zig-out\bin\faceforge-gui.exe is missing; run zig build first."
+    throw "build-native\faceforge-gui.exe is missing; build the GUI first."
 }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }

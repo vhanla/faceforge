@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Build the C++ core (ONNX Runtime + OpenCV) and the Zig/DVUI GUI on Windows.
+    Build the C++ core (ONNX Runtime + OpenCV) and the native C++ GUI on Windows.
 
 .DESCRIPTION
     OpenCV is resolved in this order:
@@ -70,10 +70,20 @@ try {
     }
 
     if (-not $CoreOnly) {
-        Write-Host "==> building GUI (Zig + DVUI)"
-        & zig build
-        if ($LASTEXITCODE -ne 0) { throw "zig build failed" }
-        Write-Host "==> binary: zig-out\bin\faceforge-gui.exe"
+        if (-not $GuiOnly) {
+            $coreLib = Join-Path $root "build\faceforge.lib"
+            if (-not (Test-Path $coreLib)) {
+                throw "The core is not built. Run .\scripts\build.ps1 -CoreOnly first."
+            }
+        }
+        Write-Host "==> configuring GUI (native C++/AMUIE)"
+        & cmake -S gui-native -B build-native
+        if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
+
+        Write-Host "==> building GUI"
+        & cmake --build build-native --config Release -j $Jobs
+        if ($LASTEXITCODE -ne 0) { throw "GUI build failed" }
+        Write-Host "==> binary: build-native\faceforge-gui.exe"
     }
 
     Write-Host "==> build complete"

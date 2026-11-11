@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Build the Windows Inno Setup installer from an existing zig-out\bin.
+    Build the Windows Inno Setup installer from an existing build-native directory.
 
 .DESCRIPTION
     Runs iscc with the version, source and output paths. This is the same
@@ -19,12 +19,12 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$bin = Join-Path $root "zig-out\bin"
+$bin = Join-Path $root "build-native"
 $dist = Join-Path $root "dist"
 $iss = Join-Path $PSScriptRoot "faceforge.iss"
 
 if (-not (Test-Path (Join-Path $bin "faceforge-gui.exe"))) {
-    throw "zig-out\bin\faceforge-gui.exe is missing; run zig build first."
+    throw "build-native\faceforge-gui.exe is missing; build the GUI first."
 }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 

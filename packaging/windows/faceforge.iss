@@ -1,7 +1,7 @@
 ; Inno Setup script for FaceForge.
 ;
 ; Build with packaging\windows\build_installer.ps1 (or directly):
-;   iscc /DVersion=0.2.0 /DSourceDir=C:\path\to\zig-out\bin ^
+;   iscc /DVersion=0.2.0 /DSourceDir=C:\path\to\build-native ^
 ;        /DOutputDir=C:\path\to\dist /DRepoRoot=C:\path\to\repo faceforge.iss
 ;
 ; The installer is per-user by default (no admin, installs under
@@ -12,7 +12,7 @@
   #define Version "0.0.0"
 #endif
 #ifndef SourceDir
-  #define SourceDir "..\..\zig-out\bin"
+  #define SourceDir "..\..\build-native"
 #endif
 #ifndef OutputDir
   #define OutputDir "..\..\dist"
@@ -59,7 +59,7 @@ Name: "fetchmodels"; Description: "Download model weights now (needs Python with
 
 [Files]
 ; Application binaries (faceforge-gui.exe, faceforge.dll, onnxruntime*.dll,
-; opencv_*.dll) produced by zig build.
+; opencv_*.dll) produced by the CMake build.
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Launch wrapper that starts the app in a per-user, writable data folder.
 Source: "{#RepoRoot}\packaging\windows\faceforge.cmd"; DestDir: "{app}"; Flags: ignoreversion

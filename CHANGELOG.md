@@ -8,6 +8,16 @@ Released versions match the git tags (`vX.Y.Z`).
 
 ## [Unreleased]
 
+### Changed
+
+- `main` ships the native C++ UI (AMUIE widgets over GLFW/OpenGL); the Zig +
+  DVUI UI is archived on the `legacy-zig` branch.
+- Build with two CMake projects (`build/` for the core, `build-native/` for the
+  UI). Zig is no longer required.
+- Video mode has its own optional *Match input grain* control.
+- Grain matching blurs only the padded face regions and can update a frame in
+  place, roughly halving its cost.
+
 ## [0.1.0] - 2026-11-04
 
 ### Added

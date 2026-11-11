@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the C++ core (ONNX Runtime + OpenCV) and the Zig/DVUI GUI.
+# Build the C++ core (ONNX Runtime + OpenCV) and the native C++ GUI.
 #
 #   scripts/build.sh            # release core + GUI
 #   scripts/build.sh --core     # only the core + ffbench
@@ -28,9 +28,15 @@ if [[ "${MODE}" == "all" || "${MODE}" == "--core" ]]; then
 fi
 
 if [[ "${MODE}" == "all" || "${MODE}" == "--gui" ]]; then
-  echo "==> building GUI (Zig + DVUI)"
-  zig build
-  echo "==> binary: zig-out/bin/faceforge-gui"
+  if [[ ! -f build/libfaceforge.so && ! -f build/libfaceforge.dylib && ! -f build/faceforge.lib ]]; then
+    echo "error: the core is not built. Run scripts/build.sh --core first." >&2
+    exit 1
+  fi
+  echo "==> configuring GUI (native C++/AMUIE)"
+  cmake -S gui-native -B build-native -DCMAKE_BUILD_TYPE=Release
+  echo "==> building GUI"
+  cmake --build build-native -j "${JOBS}"
+  echo "==> binary: build-native/faceforge-gui"
 fi
 
 echo "==> build complete"

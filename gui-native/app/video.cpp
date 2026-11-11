@@ -45,7 +45,7 @@ std::string joinPath(const std::string& a, const std::string& b) {
 }
 
 // FNV-1a 64-bit. The cache signature only needs to be stable within a run, so a
-// simple hash is enough (it is never shared with the Zig build).
+// simple hash is enough (it is never shared with other builds).
 struct Hasher {
     uint64_t h = 0xcbf29ce484222325ULL;
     void bytes(const void* p, size_t n) {

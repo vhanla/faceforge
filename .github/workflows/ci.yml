@@ -17,17 +17,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             cmake ninja-build patchelf dpkg-dev file desktop-file-utils \
-            libopencv-dev \
-            libgl1-mesa-dev libegl1-mesa-dev \
+            libopencv-dev libglfw3-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libx11-dev \
             python3
-
-      - name: Install Zig 0.17.0
-        run: |
-          curl -L --fail -o /tmp/zig.tar.xz \
-            https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
-          mkdir -p "$HOME/zig"
-          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig" --strip-components=1
-          echo "$HOME/zig" >> "$GITHUB_PATH"
 
       - name: ONNX Runtime (CPU)
         env:
@@ -40,7 +32,9 @@ jobs:
           cmake --build build --config Release -j "$(nproc)"
 
       - name: Build GUI
-        run: zig build
+        run: |
+          cmake -S gui-native -B build-native -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-native -j "$(nproc)"
 
       - name: Cache AppImage tools
         uses: actions/cache@v4
@@ -70,8 +64,8 @@ jobs:
       - name: Smoke test
         run: |
           ./build/ffbench --help > /dev/null
-          test -x zig-out/bin/faceforge-gui
-          test -f zig-out/lib/libfaceforge.so
+          test -x build-native/faceforge-gui
+          test -f build/libfaceforge.so
 
   windows:
     name: Windows (CPU)
@@ -82,15 +76,6 @@ jobs:
       OpenCV_DIR: C:\opencv\build
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Zig 0.17.0
-        shell: pwsh
-        run: |
-          $ProgressPreference = "SilentlyContinue"
-          $url = "https://ziglang.org/download/0.17.0/zig-x86_64-windows-0.17.0.zip"
-          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\zig.zip"
-          Expand-Archive "$env:RUNNER_TEMP\zig.zip" -DestinationPath "C:\zig" -Force
-          "C:\zig\zig-x86_64-windows-0.17.0" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
       - name: OpenCV 4.14 (prebuilt)
         shell: pwsh
@@ -117,7 +102,9 @@ jobs:
 
       - name: Build GUI
         shell: pwsh
-        run: zig build
+        run: |
+          cmake -S gui-native -B build-native
+          cmake --build build-native --config Release -j $env:NUMBER_OF_PROCESSORS
 
       - name: Inno Setup
         shell: pwsh
@@ -147,7 +134,7 @@ jobs:
         run: |
           .\build\ffbench.exe --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "ffbench --help failed" }
-          if (-not (Test-Path .\zig-out\bin\faceforge-gui.exe)) { throw "GUI missing" }
-          if (-not (Test-Path .\zig-out\bin\faceforge.dll)) { throw "core DLL missing" }
-          if (-not (Test-Path .\zig-out\bin\onnxruntime.dll)) { throw "onnxruntime.dll not bundled" }
-          Get-ChildItem .\zig-out\bin\opencv_*.dll
+          if (-not (Test-Path .\build-native\faceforge-gui.exe)) { throw "GUI missing" }
+          if (-not (Test-Path .\build-native\faceforge.dll)) { throw "core DLL missing" }
+          if (-not (Test-Path .\build-native\onnxruntime.dll)) { throw "onnxruntime.dll not bundled" }
+          Get-ChildItem .\build-native\opencv_*.dll

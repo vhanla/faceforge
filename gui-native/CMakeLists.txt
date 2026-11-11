@@ -6,10 +6,29 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Native UI spike: the vendored AMUIE library plus a FaceForge app that talks to
-# the core over the pure C ABI (core/include/faceforge.h). The core itself is
-# built by the repository's root CMake project; this one only builds the UI.
-find_package(glfw3 3.3 REQUIRED)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
+
+# Native UI: the vendored AMUIE library plus a FaceForge app that talks to the
+# core over the pure C ABI (core/include/faceforge.h). The core itself is built
+# by the repository's root CMake project; this one only builds the UI.
+find_package(glfw3 3.3 QUIET)
+if(NOT glfw3_FOUND)
+    # Fall back to a pinned GLFW build when the system does not ship a CMake
+    # package (e.g. the Windows CI runner). On Linux, installing libglfw3-dev
+    # avoids this download.
+    include(FetchContent)
+    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(glfw
+        GIT_REPOSITORY https://github.com/glfw/glfw.git
+        GIT_TAG 3.4
+        GIT_SHALLOW TRUE)
+    FetchContent_MakeAvailable(glfw)
+endif()
 
 set(AMUIE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/amuie")
 set(FACEFORGE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
@@ -59,7 +78,14 @@ add_test(NAME amuie-tests COMMAND amuie-tests)
 
 # ---- FaceForge core (C ABI) ------------------------------------------------
 # Build the root project first (`cmake --build build`); this target only links.
-set(FACEFORGE_LIB "${FACEFORGE_ROOT}/build/libfaceforge${CMAKE_SHARED_LIBRARY_SUFFIX}")
+# On Windows the import library is faceforge.lib, not the DLL, and it has no
+# "lib" prefix.
+if(WIN32)
+    set(FACEFORGE_LIB "${FACEFORGE_ROOT}/build/faceforge.lib")
+else()
+    set(FACEFORGE_LIB
+        "${FACEFORGE_ROOT}/build/${CMAKE_SHARED_LIBRARY_PREFIX}faceforge${CMAKE_SHARED_LIBRARY_SUFFIX}")
+endif()
 if(NOT EXISTS "${FACEFORGE_LIB}")
     message(FATAL_ERROR
         "libfaceforge not found at ${FACEFORGE_LIB}. Build the core first: "
@@ -96,18 +122,31 @@ if(NOT MSVC)
     target_compile_options(faceforge-ui PRIVATE -Wall -Wextra)
 endif()
 
-# ---- Spike executable ------------------------------------------------------
-add_executable(faceforge-spike "${CMAKE_CURRENT_SOURCE_DIR}/app/spike_main.cpp")
-target_include_directories(faceforge-spike PRIVATE "${FACEFORGE_ROOT}/core/include")
-target_link_libraries(faceforge-spike PRIVATE faceforge-ui "${FACEFORGE_LIB}")
+# ---- FaceForge executable --------------------------------------------------
+add_executable(faceforge-gui "${CMAKE_CURRENT_SOURCE_DIR}/app/main.cpp")
+target_include_directories(faceforge-gui PRIVATE "${FACEFORGE_ROOT}/core/include")
+target_link_libraries(faceforge-gui PRIVATE faceforge-ui "${FACEFORGE_LIB}")
 
 # Resolve the core and ONNX Runtime from the build tree.
 set(_ff_rpath "${FACEFORGE_ROOT}/build;${FACEFORGE_ROOT}/third_party/onnxruntime/lib")
-set_target_properties(faceforge-spike PROPERTIES
+set_target_properties(faceforge-gui PROPERTIES
     BUILD_RPATH "${_ff_rpath}"
     INSTALL_RPATH "${_ff_rpath}"
 )
 
 if(NOT MSVC)
-    target_compile_options(faceforge-spike PRIVATE -Wall -Wextra)
+    target_compile_options(faceforge-gui PRIVATE -Wall -Wextra)
+endif()
+
+# On Windows the core, ONNX Runtime providers and OpenCV DLLs must sit next to
+# the executable. The root project already collects them in build/.
+if(WIN32)
+    file(GLOB FF_CORE_DLLS "${FACEFORGE_ROOT}/build/*.dll")
+    if(FF_CORE_DLLS)
+        add_custom_command(TARGET faceforge-gui POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${FF_CORE_DLLS} "$<TARGET_FILE_DIR:faceforge-gui>"
+            COMMAND_EXPAND_LISTS
+            VERBATIM)
+    endif()
 endif()

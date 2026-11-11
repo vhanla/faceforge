@@ -16,8 +16,8 @@ DIST="${DIST:-$ROOT/dist}"
 TOOLS="${TOOLS:-$ROOT/.cache/appimage-tools}"
 ARCH="x86_64"
 
-if [[ ! -x "$ROOT/zig-out/bin/faceforge-gui" ]]; then
-  echo "error: zig-out/bin/faceforge-gui is missing; build first." >&2
+if [[ ! -x "$ROOT/build-native/faceforge-gui" ]]; then
+  echo "error: build-native/faceforge-gui is missing; build the GUI first." >&2
   exit 1
 fi
 
@@ -48,8 +48,8 @@ mkdir -p "$APPDIR/usr/bin" \
          "$APPDIR/usr/share/applications" \
          "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 
-install -m 0755 "$ROOT/zig-out/bin/faceforge-gui" "$APPDIR/usr/bin/faceforge-gui"
-install -m 0644 "$ROOT/zig-out/lib/libfaceforge.so" "$APPDIR/usr/lib/libfaceforge.so"
+install -m 0755 "$ROOT/build-native/faceforge-gui" "$APPDIR/usr/bin/faceforge-gui"
+install -m 0644 "$ROOT/build/libfaceforge.so" "$APPDIR/usr/lib/libfaceforge.so"
 install -m 0644 "$ROOT"/third_party/onnxruntime/lib/libonnxruntime.so* "$APPDIR/usr/lib/"
 install -m 0644 "$ROOT/packaging/icons/faceforge.png" \
   "$APPDIR/usr/share/icons/hicolor/256x256/apps/faceforge.png"

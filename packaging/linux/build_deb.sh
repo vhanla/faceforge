@@ -18,8 +18,8 @@ STAGE="$DIST/$PKG"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-if [[ ! -x "$ROOT/zig-out/bin/faceforge-gui" ]]; then
-  echo "error: zig-out/bin/faceforge-gui is missing; build first." >&2
+if [[ ! -x "$ROOT/build-native/faceforge-gui" ]]; then
+  echo "error: build-native/faceforge-gui is missing; build the GUI first." >&2
   exit 1
 fi
 
@@ -31,8 +31,8 @@ mkdir -p "$STAGE/DEBIAN" \
          "$STAGE/usr/share/icons/hicolor/256x256/apps" \
          "$STAGE/usr/share/faceforge/scripts"
 
-install -m 0755 "$ROOT/zig-out/bin/faceforge-gui" "$STAGE/usr/bin/faceforge-gui"
-install -m 0644 "$ROOT/zig-out/lib/libfaceforge.so" "$STAGE/usr/lib/faceforge/libfaceforge.so"
+install -m 0755 "$ROOT/build-native/faceforge-gui" "$STAGE/usr/bin/faceforge-gui"
+install -m 0644 "$ROOT/build/libfaceforge.so" "$STAGE/usr/lib/faceforge/libfaceforge.so"
 # -a keeps the .so -> .so.1 -> .so.1.x.y symlink chain instead of copying the
 # real library three times.
 cp -a "$ROOT"/third_party/onnxruntime/lib/libonnxruntime.so* "$STAGE/usr/lib/faceforge/"
@@ -96,7 +96,7 @@ Installed-Size: ${SIZE}
 Description: Native face restoration and face swap
  FaceForge detects faces, swaps identities with inswapper_128 and can
  restore the result with GFPGAN 1.4 or Real-ESRGAN, using ONNX Runtime
- and OpenCV behind a Zig + DVUI desktop UI.
+ and OpenCV behind a native C++ desktop UI.
  .
  Model weights are not included (non-commercial licenses). Run
  faceforge-fetch-models to download them into a per-user data directory.

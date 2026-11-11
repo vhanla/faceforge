@@ -89,17 +89,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             cmake ninja-build patchelf dpkg-dev file desktop-file-utils \
-            libopencv-dev \
-            libgl1-mesa-dev libegl1-mesa-dev \
+            libopencv-dev libglfw3-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libx11-dev \
             python3
-
-      - name: Install Zig 0.17.0
-        run: |
-          curl -L --fail -o /tmp/zig.tar.xz \
-            https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
-          mkdir -p "$HOME/zig"
-          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig" --strip-components=1
-          echo "$HOME/zig" >> "$GITHUB_PATH"
 
       - name: ONNX Runtime (CPU)
         env:
@@ -107,7 +99,11 @@ jobs:
         run: scripts/fetch_deps.sh
 
       - name: Build
-        run: zig build -Doptimize=ReleaseSafe -Dversion="$VERSION"
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j "$(nproc)"
+          cmake -S gui-native -B build-native -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-native -j "$(nproc)"
 
       - name: Portable tarball
         run: bash packaging/linux/build_portable.sh "$VERSION"
@@ -141,15 +137,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Zig 0.17.0
-        shell: pwsh
-        run: |
-          $ProgressPreference = "SilentlyContinue"
-          $url = "https://ziglang.org/download/0.17.0/zig-x86_64-windows-0.17.0.zip"
-          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\zig.zip"
-          Expand-Archive "$env:RUNNER_TEMP\zig.zip" -DestinationPath "C:\zig" -Force
-          "C:\zig\zig-x86_64-windows-0.17.0" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-
       - name: OpenCV 4.14 (prebuilt)
         shell: pwsh
         run: |
@@ -167,7 +154,11 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: zig build -Doptimize=ReleaseSafe "-Dversion=$env:VERSION"
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOpenCV_DIR="$env:OpenCV_DIR"
+          cmake --build build --config Release -j $env:NUMBER_OF_PROCESSORS
+          cmake -S gui-native -B build-native
+          cmake --build build-native --config Release -j $env:NUMBER_OF_PROCESSORS
 
       - name: Inno Setup
         shell: pwsh

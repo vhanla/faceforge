@@ -15,16 +15,16 @@ DIST="${DIST:-$ROOT/dist}"
 PKG="faceforge-${VERSION}-linux-x64"
 STAGE="$DIST/$PKG"
 
-if [[ ! -x "$ROOT/zig-out/bin/faceforge-gui" ]]; then
-  echo "error: zig-out/bin/faceforge-gui is missing; build first." >&2
+if [[ ! -x "$ROOT/build-native/faceforge-gui" ]]; then
+  echo "error: build-native/faceforge-gui is missing; build the GUI first." >&2
   exit 1
 fi
 
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/lib" "$STAGE/scripts"
 
-install -m 0755 "$ROOT/zig-out/bin/faceforge-gui" "$STAGE/bin/"
-install -m 0644 "$ROOT/zig-out/lib/libfaceforge.so" "$STAGE/lib/"
+install -m 0755 "$ROOT/build-native/faceforge-gui" "$STAGE/bin/"
+install -m 0644 "$ROOT/build/libfaceforge.so" "$STAGE/lib/"
 # -a keeps the .so -> .so.1 -> .so.1.x.y symlink chain instead of copying the
 # real library three times.
 cp -a "$ROOT"/third_party/onnxruntime/lib/libonnxruntime.so* "$STAGE/lib/"

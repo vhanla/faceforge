@@ -28,8 +28,9 @@ if(FF_NATIVE_BUILD)
     message(STATUS "FF_NATIVE_BUILD: tuning for the build machine")
 endif()
 
-# Pin all artifacts to the build root so build.zig can find them regardless of
-# the generator (Makefiles/Ninja vs. Visual Studio multi-config).
+# Pin all artifacts to the build root so the native GUI project (gui-native)
+# can find them regardless of the generator (Makefiles/Ninja vs. Visual Studio
+# multi-config).
 set(_ff_out ${CMAKE_BINARY_DIR})
 foreach(_cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY${_cfg} ${_ff_out})
