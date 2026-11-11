@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(AMUIE_Engine CXX)
+project(AMUIE_Engine C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,10 +17,13 @@ add_library(amuie STATIC
     src/platform/window.cpp
     src/platform/input.cpp
     src/backend/opengl3_backend.cpp
+    src/backend/glad/gl.c
     src/assets/font_atlas.cpp
 )
 
 target_include_directories(amuie PUBLIC src)
+# Vendored glad loader (GL 3.3 core), private to the OpenGL backend.
+target_include_directories(amuie PRIVATE src/backend/glad)
 target_link_libraries(amuie PUBLIC glfw)
 
 if(WIN32)

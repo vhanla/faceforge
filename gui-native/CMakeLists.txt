@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(faceforge_native_ui CXX)
+project(faceforge_native_ui C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -40,9 +40,12 @@ add_library(amuie STATIC
     "${AMUIE_DIR}/platform/window.cpp"
     "${AMUIE_DIR}/platform/input.cpp"
     "${AMUIE_DIR}/backend/opengl3_backend.cpp"
+    "${AMUIE_DIR}/backend/glad/gl.c"
     "${AMUIE_DIR}/assets/font_atlas.cpp"
 )
 target_include_directories(amuie PUBLIC "${AMUIE_DIR}")
+# Vendored glad loader (GL 3.3 core), private to the OpenGL backend.
+target_include_directories(amuie PRIVATE "${AMUIE_DIR}/backend/glad")
 target_link_libraries(amuie PUBLIC glfw)
 
 if(WIN32)

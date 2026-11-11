@@ -1,6 +1,14 @@
 #include "platform/window.hpp"
 
 #if defined(_WIN32)
+// Keep the Windows headers from defining the min/max macros (they collide with
+// std::min / std::max) and trim the rest of the rarely used surface.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <commdlg.h>
 #include <dwmapi.h>
@@ -13,6 +21,18 @@
 
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
+
+// glfwGetPlatform, GLFW_PLATFORM_* and the directional resize cursors were
+// added in GLFW 3.4; GLFW 3.3 (still the distro package on some CI images) has
+// none of them. Detect at compile time so the engine builds against either.
+#ifndef AMUIE_GLFW_HAS_PLATFORM
+#if defined(GLFW_VERSION_MAJOR) && (GLFW_VERSION_MAJOR > 3 || \
+    (GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 4))
+#define AMUIE_GLFW_HAS_PLATFORM 1
+#else
+#define AMUIE_GLFW_HAS_PLATFORM 0
+#endif
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -166,9 +186,11 @@ Window* create(const WindowDesc& desc) {
 #if defined(__linux__)
     // X11 (XWayland) is used by default because it supports window positioning
     // and reliable screenshots. Unset DISPLAY to let GLFW pick Wayland.
+#if AMUIE_GLFW_HAS_PLATFORM
     if (std::getenv("DISPLAY")) {
         glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
     }
+#endif
 #endif
     if (!glfwInit()) {
         std::fprintf(stderr, "glfwInit failed\n");
@@ -219,7 +241,12 @@ Window* create(const WindowDesc& desc) {
     Window* w = new Window();
     w->handle = handle;
     w->cursor_arrow = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
+#if AMUIE_GLFW_HAS_PLATFORM
     w->cursor_resize = glfwCreateStandardCursor(GLFW_RESIZE_NWSE_CURSOR);
+#else
+    // GLFW 3.3 has no diagonal resize cursor; a horizontal one is the closest.
+    w->cursor_resize = glfwCreateStandardCursor(GLFW_HRESIZE_CURSOR);
+#endif
     glfwSetWindowUserPointer(handle, w);
     glfwSetScrollCallback(handle, on_scroll);
     glfwSetKeyCallback(handle, on_key);
@@ -374,6 +401,21 @@ void toggle_maximize(Window* window) {
     else glfwMaximizeWindow(window->handle);
 }
 
+// Whether the window manager lets the app move its own window. Wayland forbids
+// it, X11 and Win32 allow it (macOS gets its own title-bar drag).
+static bool window_move_supported() {
+#if AMUIE_GLFW_HAS_PLATFORM
+    const int p = glfwGetPlatform();
+    return p == GLFW_PLATFORM_X11 || p == GLFW_PLATFORM_WIN32;
+#elif defined(_WIN32) || defined(__APPLE__)
+    return true;
+#else
+    // GLFW 3.3 has no runtime platform query; programmatic moves only work on
+    // X11, so treat a Wayland session as unsupported.
+    return std::getenv("WAYLAND_DISPLAY") == nullptr;
+#endif
+}
+
 void drag_update(Window* window, bool active) {
     if (!window) return;
     if (!active) { window->dragging = false; return; }
@@ -391,8 +433,7 @@ void drag_update(Window* window, bool active) {
     const double dy = my - window->drag_last_y;
     if (dx == 0.0 && dy == 0.0) return;
 
-    const int platform_id = glfwGetPlatform();
-    if (platform_id == GLFW_PLATFORM_X11 || platform_id == GLFW_PLATFORM_WIN32) {
+    if (window_move_supported()) {
         int wx = 0, wy = 0;
         glfwGetWindowPos(window->handle, &wx, &wy);
         glfwSetWindowPos(window->handle, wx + static_cast<int>(dx), wy + static_cast<int>(dy));
@@ -450,6 +491,7 @@ void set_cursor_resize(Window* window, bool resize) {
 double time_seconds() { return glfwGetTime(); }
 
 const char* platform_name() {
+#if AMUIE_GLFW_HAS_PLATFORM
     switch (glfwGetPlatform()) {
         case GLFW_PLATFORM_WIN32: return "Windows";
         case GLFW_PLATFORM_COCOA: return "macOS";
@@ -457,6 +499,13 @@ const char* platform_name() {
         case GLFW_PLATFORM_X11: return "X11";
         default: return "unknown";
     }
+#elif defined(_WIN32)
+    return "Windows";
+#elif defined(__APPLE__)
+    return "macOS";
+#else
+    return std::getenv("WAYLAND_DISPLAY") ? "Wayland" : "X11";
+#endif
 }
 
 // ---- Native file choosers --------------------------------------------------

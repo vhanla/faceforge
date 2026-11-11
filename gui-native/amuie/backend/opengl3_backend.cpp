@@ -1,7 +1,10 @@
 #define GLFW_INCLUDE_NONE
-#define GL_GLEXT_PROTOTYPES
+// Vendored glad loader (GL 3.3 core). It resolves the GL entry points through
+// glfwGetProcAddress, so the engine no longer needs libGL to re-export the
+// modern symbols and works unchanged on Windows (where opengl32.lib only ever
+// exported GL 1.1).
+#include <glad/gl.h>
 #include <GLFW/glfw3.h>
-#include <GL/glcorearb.h>
 
 #include "backend/opengl3_backend.hpp"
 #include "core/font.hpp"
@@ -312,6 +315,9 @@ OpenGL3Backend::~OpenGL3Backend() {
 
 void OpenGL3Backend::init() {
     impl_ = new Impl();
+    if (!gladLoadGL(reinterpret_cast<GLADloadfunc>(glfwGetProcAddress))) {
+        std::fprintf(stderr, "opengl3: failed to load GL function pointers\n");
+    }
     impl_->vertices = new Impl::Vertex[Impl::kMaxVertices];
     impl_->program = link_program(kVertexShader, kFragmentShader);
     impl_->u_view_size = glGetUniformLocation(impl_->program, "u_view_size");

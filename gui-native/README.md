@@ -9,8 +9,9 @@ gui-native/
   amuie/          vendored AMUIE library, kept in sync with ../arenaui/src:
                   textures (CMD_DRAW_TEXTURE + OpenGL registry + ui_image),
                   editable widgets (ui_text_edit, ui_slider), keyboard/
-                  clipboard/drag-drop input, acrylic window, file dialogs and
-                  a media combo
+                  clipboard/drag-drop input, acrylic window, file dialogs, a
+                  media combo and a vendored glad GL loader (backend/glad,
+                  GLFW 3.3/3.4 compatible)
   amuie-tools/    asset baker + icon SVGs (regenerate the font atlas)
   amuie-tests/    library unit tests (headless; run with `amuie-tests`)
   app/            FaceForge itself: the UI-agnostic app layer (pipeline,
