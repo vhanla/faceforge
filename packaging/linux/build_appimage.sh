@@ -24,7 +24,9 @@ fi
 mkdir -p "$TOOLS" "$DIST"
 
 fetch_tool() {
-  local name="$1" url="$2" out="$TOOLS/$name"
+  local name="$1"
+  local url="$2"
+  local out="$TOOLS/$name"
   if [[ ! -x "$out" ]]; then
     echo "==> fetching $name"
     curl -L --fail --retry 3 -o "$out" "$url"

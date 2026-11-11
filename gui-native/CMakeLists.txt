@@ -10,6 +10,17 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+# Pin all artifacts to the build root so the packaging scripts (and the
+# portable launcher, which expect faceforge-gui[.exe] next to its DLLs) work
+# regardless of the generator. Visual Studio would otherwise emit them into
+# build-native/<Config>/. Mirrors the root project's output-dir pinning.
+set(_ff_out ${CMAKE_BINARY_DIR})
+foreach(_cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY${_cfg} ${_ff_out})
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY${_cfg} ${_ff_out})
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY${_cfg} ${_ff_out})
+endforeach()
+
 # Native UI: the vendored AMUIE library plus a FaceForge app that talks to the
 # core over the pure C ABI (core/include/faceforge.h). The core itself is built
 # by the repository's root CMake project; this one only builds the UI.
