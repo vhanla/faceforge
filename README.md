@@ -38,18 +38,19 @@ compare the original against the result with a toggleable face overlay.
 
 ## Features
 
-- **GPU first, CPU fallback.** CUDA execution provider with a configurable
-  arena limit; the CPU provider is selected automatically when CUDA is not
-  available. Sessions can be unloaded between stages (the `sequential`
-  option) to fit a 4 GB card.
+- **GPU first, CPU fallback.** CUDA execution provider with an optional GPU
+  arena limit in the core API (exposed by `ffbench --gpu-mem-limit`); the CPU
+  provider is selected automatically when CUDA is not available. Sessions can
+  be unloaded between stages (the `sequential` option) to fit a 4 GB card.
 - **Editor workflow.** Open or paste a target, add any number of identity
-  images, drag & drop files onto either rail, click a face to include/exclude
-  it, and right-click for a per-face menu. Undo/redo, *Apply as input*,
-  clipboard export and PNG saving are built in.
+  images, drop files on the identity panel or the canvas, click a face (or its
+  row) to include/exclude it, and use the canvas or identity context menus for
+  the common actions. Undo/redo, *Apply as input*, clipboard export and PNG
+  saving are built in.
 - **Identity library.** Every identity image you add contributes all of its
-  detected faces to a flat, scrollable library. Click a thumbnail to make it
-  the default identity, right-click to remove it, or pick a specific identity
-  for any target face from that face's dropdown — combinations are unlimited
+  detected faces to a flat library. Click a thumbnail to make it the default
+  identity, clear the library with `Clear`, or pick a specific identity for any
+  target face from that face's dropdown — combinations are unlimited
   (e.g. one face from `lena.jpg`, the rest from `messi.jpg`).
 - **Hot per-face updates.** Every swapped face is cached as a 128×128 patch and
   its affine matrix, tagged with the identity, mouth flag and working
@@ -68,12 +69,11 @@ compare the original against the result with a toggleable face overlay.
   expression. Enabled by default, with a per-face `Mouth` override so only
   selected faces keep their original mouth.
 - **Native canvas.** Wheel zoom, middle-drag pan, 1:1/Fit, toggleable face
-  overlay with numbered tags, thumbnails in the face list, and per-face
-  zoom-to-face.
+  overlay with numbered tags and thumbnails in the face list.
 - **Studio retouch layer.** A paint layer over the composed result that reveals
   the original pixels: erase added hair, blemishes, halos or background bleed
-  without discarding the rest of the swap. Adjustable size, hardness and
-  opacity; erase/restore brushes; red mask preview; hold-to-view-original;
+  without discarding the rest of the swap. Adjustable brush size, hardness and
+  opacity; erase/restore brushes; red mask preview; a *View original* toggle;
   per-stroke undo/redo. The mask lives at base resolution, survives quality
   toggles and re-renders, and is applied to save, copy and *Apply as input*.
 - **Video workspace.** A purpose-built clip editor rather than a general NLE:
@@ -232,22 +232,20 @@ is set (see `vcpkg.json`), then whatever CMake can find. `build.ps1` honors
 the `OpenCV_DIR` environment variable. The ONNX Runtime DLLs are copied next to
 the executables, so the build is runnable from `build-native\`.
 
-`FACEFORGE_AUTORUN=1 ./build-native/faceforge-gui` runs the whole pipeline once
-with the default images and saves the result to
-`bench/results/gui_result.png`. This is handy for smoke tests and for
-generating screenshots without clicking. Two more variables make that run
-configurable: `FACEFORGE_PROVIDER=cpu|cuda` and `FACEFORGE_SEQUENTIAL=1`
-(the same as ticking *Unload models after each run*).
+Run the app from the repository root: the default target
+(`assets/target_t1.jpg`), the default identity (`assets/source_lena.jpg`) and
+the `models` folder are resolved relative to the working directory. When those
+files are absent (a packaged install) the app starts with an empty canvas.
+`FACEFORGE_TARGET`, `FACEFORGE_IDENTITY` (a `;`-separated list, or `--identity`
+repeated) and `FACEFORGE_PROVIDER=cpu|cuda` override the defaults, and
+`FACEFORGE_SEQUENTIAL=1` is the same as ticking *Unload models between runs*.
 
-`FACEFORGE_SELFTEST=1` (optionally together with the variables above) runs a
-scripted end-to-end check: init → per-face identity + mouth override (when two
-identities are loaded) → skip one face and recompose → reprocess that face →
-recompose all → switch to the preview level and back (asserting the cached
-patches are reused, i.e. 0 ms of swapping) → apply the result as the new input
-→ undo → save. It prints timings for each step and exits when finished, so it
-can be used in CI. Add
-`FACEFORGE_IDENTITY=assets/source_lena.jpg;assets/source_messi.jpg` to exercise
-the two-identity path.
+Headless rendering is available through `--screenshot OUT`: the app draws a
+few frames, writes a PPM and exits. `--frames N`, `--wait` (screenshot once the
+pipeline goes idle) and `--size WxH` shape that capture, and
+`FACEFORGE_STUDIO=1` / `FACEFORGE_STUDIO_PAINT=1` open Studio with a sample
+retouch stroke. There is no scripted photo-mode end-to-end run in the native UI
+yet; the video workspace has `FACEFORGE_VIDEOTEST` (see below).
 
 ### Build options
 
@@ -282,91 +280,105 @@ newer-hardware TODO.
 
 ## Using the GUI
 
-The window is split into an identity rail (left), the canvas (centre) and the
-detected-face list plus statistics (right).
+The window has a collapsible icon rail on the left (Photo, Video, Settings,
+About), a toolbar with the open/paste actions, the identity, quality, Studio and
+output panel, the canvas, and the detected-face list, history and statistics on
+the right.
 
-1. **Load images.** Use `Open target…` / `Add identity…` (multi-select),
-   paste from the clipboard, or drop a file on the left rail (identity) or the
-   canvas (target). `Add identity…`, drops and pastes append to the identity
-   library; existing identities are kept.
+1. **Load images.** Use `Open target...` / `Add identity...` (multi-select),
+   paste from the clipboard (`Paste target` / `Paste identity`), or drop a file
+   on the identity panel (identity) or the canvas (target). `Add identity...`,
+   drops and pastes append to the identity library; existing identities are
+   kept. Right-click the identity panel for *Add identity...*, *Paste identity*
+   and *Clear all*; right-click the canvas for *Paste target*, *Open target...*,
+   *Reset View / Fit*, *1:1 Pixel View* and *Clear Canvas*.
 2. **Identity library.** Each added image contributes one thumbnail per face it
    contains, labelled `<file> #<n>`. Click a thumbnail to make it the default
-   for every face without an explicit choice; right-click it for *Set as
-   default*, *Remove identity* or *Add identity…*. Hover for the full label.
+   for every face without an explicit choice; the label under the row names the
+   current default. Thumbnails have no context menu; use `Clear` to empty the
+   library.
 3. **Quality.** Choose the face restoration (`None`, `GFPGAN 1.4`) and an
    optional frame *Upscale* (`Off`, `2x`, `4x`, or the `1080p`/`1440p`/`4K`
-   presets for 16:9 inputs). *Match input grain* re-applies the original noise
-   on restored faces so they do not look pasted (see `docs/grain_matching.md`).
-   Keep *Restore mouths from original* on unless you want the swap's own mouth,
-   and leave *Fast preview* on while composing. Turn it off for the final
-   render — patches for both resolutions are cached, so toggling only computes
-   what is missing. *Unload models between runs* in Settings frees sessions
-   after every job.
-4. **Faces.** Detection runs automatically after loading. Each face card has
-   its own `Swap` and `Mouth` toggles, a `Redo` button and a `Face` dropdown
-   listing the whole identity library (plus `(default)`); changing the dropdown
-   reprocesses only that face. Click a face on the canvas (or its card
-   thumbnail) to toggle it; skipped faces keep the original pixels and are
-   drawn with a grey box. Right-click a face for *Skip/Swap*,
-   *Reprocess this face*, *Zoom to face*, *Swap all*, *Skip all*, *Apply result
-   as input* and *Undo*.
+   presets offered for 16:9 inputs). *Match input grain* re-applies the original
+   noise on restored faces so they do not look pasted (see
+   `docs/grain_matching.md`). Keep *Restore mouths from original* on unless you
+   want the swap's own mouth, and leave *Fast preview* on while composing. Turn
+   it off for the final render — patches for both resolutions are cached, so
+   toggling only computes what is missing. *Unload models between runs* frees
+   sessions after every job.
+4. **Faces.** Detection runs automatically after loading. `All` / `None` toggle
+   every face. Each row has a thumbnail, a `Mouth` checkbox and a `Face`
+   dropdown listing `Default`, the identity library and `Skip face` (which keeps
+   the original pixels). Clicking a row toggles the swap; changing the dropdown
+   reprocesses only that face. Skipped faces are drawn with a grey box.
 5. **Canvas.** Wheel zooms around the cursor, middle-drag pans, `Fit` and `1:1`
    reset the view. The `Overlay` checkbox hides the boxes and numbered tags, and
    `Original` switches between the composed result and the untouched input
-   (Studio has its own `View original`).
+   (Studio has its own *View original*).
 6. **History.** *Apply as input* installs the composed result as the new base
    image (useful for stacking passes) and pushes the previous base onto the
-   undo stack; `Undo`/`Redo` restore those snapshots. `Ctrl+Z`, `Ctrl+Shift+Z`,
-   `Ctrl+Y`, `Ctrl+O` and `Ctrl+S` work too.
+   undo stack; `Undo`/`Redo` restore those snapshots. These buttons are the only
+   workspace history entry points outside Studio.
 7. **Studio.** *Open Studio* turns the canvas into a retouch editor: paint with
-   the left button to reveal the original under the result, or *Restore* to
-   paint the swap back. *Size*, *Hard* and *Opac* shape the brush (size is in
-   base-image pixels), right-click swaps erase/restore on the fly, and *Show
-   mask* tints the painted area red. *View original* previews the untouched
-   base. Strokes are undone/redone individually (`Ctrl+Z`/`Ctrl+Y`) and *Clear*
+   the left button to reveal the original under the result, or switch to
+   *Restore* to paint the swap back; right-click toggles the mode on the fly.
+   *Brush size*, *Hardness* and *Opacity* shape the brush (size is in
+   base-image pixels), and *Show retouch mask* tints the painted area red.
+   *View original* previews the untouched base. Strokes are undone/redone
+   individually with `Undo`/`Redo` in the retouch panel, and *Clear retouch*
    starts over. The mask is stored at the base resolution, so it is preserved
    when toggling *Fast preview*, changing the enhancer or reprocessing faces,
-   and it is blended into everything you save, copy or apply as input.
-8. **Export.** `Copy` writes a PNG of the result to the clipboard; `Save as…`
-   or `Ctrl+S` writes to the path shown in the output field. The field defaults
-   to `<export folder>/<target stem>_faceforge.png`, where the export folder is
-   the one configured in Settings (or the target's own folder when it is empty).
-9. **Settings and About.** `Settings` (or `Ctrl+,`) is a non-modal panel for
-   rarely-changed options only: execution provider, the models / temporary /
-   export folders, *Unload models between runs*, update preferences, a
-   *Reload models* action and the config file location. The enhancer, mouth
-   restoration, fast preview and canvas overlay stay in the workspace panels
-   where they are used. `About` (or `F1`) shows the version, author, repository,
-   active engine, update status, pipeline stages and the model licensing notes.
-   `Esc` closes either panel.
+   and it is blended into everything you save, copy or apply as input. *Close*
+   leaves Studio but keeps the retouch applied.
+8. **Export.** `Copy` writes a PNG of the result to the clipboard; `Save as...`
+   opens a save dialog seeded with the path in the output field. The field
+   defaults to `<export folder>/<target stem>_faceforge.png`, where the export
+   folder comes from the settings file or `--export-dir` (the target's own
+   folder when it is empty). `Process all` reprocesses every face and `Clear`
+   unloads the target.
+9. **Settings and About.** Both open as modal dialogs from the left rail.
+   `Settings` holds only rarely-changed options: application theme, compute
+   device (`Auto`, `CUDA`, `CPU`), models folder, *Unload models between runs*,
+   *Check GitHub releases* and *Acrylic background* (applied on the next
+   launch). It also shows the active engine and saves the config when you press
+   *Done*. The enhancer, mouth restoration, fast preview and canvas overlay
+   stay in the workspace panel where they are used. `About` shows the tagline,
+   the native UI/core notes and the repository URL. `Esc` closes either dialog
+   (and quits when no dialog is open).
+
+Shortcuts: `F2` toggles the light/dark theme, `Ctrl+C` copies the result in
+Photo mode, `Ctrl+V` pastes an image, and the video workspace adds `Space`,
+the arrow keys, `Home`/`End` and `I`/`O` (see the video section). Text fields
+support the usual `Ctrl+A`/`C`/`V`/`X`.
 
 ![Settings panel](docs/settings.png)
 ![About panel](docs/about.png)
 
 ![Studio retouch layer](docs/studio.png)
 
-Timings for the last job are shown in the right rail. The header reports total
-VRAM and RSS; the active engine is shown in Settings and About. With *Fast
-preview* on, the canvas shows
-the downscaled composite; the status bar and statistics state which mode was
-used. Per-face hot updates recompose from cached 128×128 patches, so a toggle
-is typically tens of milliseconds plus however long the selected enhancer
-takes on the whole image. Edits made while a job is still running are never
-lost: they are coalesced into a single follow-up pass when it finishes, and
-that pass only re-swaps the faces that actually went stale.
+Timings for the last job are shown in the right rail, together with the process
+memory and the resolution/mode used (`fast preview` or `full resolution`). The
+active engine is shown in Settings and in the toolbar. With *Fast preview* on,
+the canvas shows the downscaled composite. Per-face hot updates recompose from
+cached 128×128 patches, so a toggle is typically tens of milliseconds plus
+however long the selected enhancer takes on the whole image. Edits made while a
+job is still running are never lost: they are coalesced into a single follow-up
+pass when it finishes, and that pass only re-swaps the faces that actually went
+stale.
 
-For scripted runs, `FACEFORGE_IDENTITY` accepts a semicolon-separated list of
-identity images (e.g. `assets/source_lena.jpg;assets/source_messi.jpg`).
+The startup identity list can also come from `FACEFORGE_IDENTITY`, which
+accepts a semicolon-separated list (e.g.
+`assets/source_lena.jpg;assets/source_messi.jpg`).
 
 ## Settings, folders and updates
 
-The Settings panel intentionally contains only options that are changed once:
-the execution provider, where models are read from, where temporary files and
-exports are written, whether sessions are unloaded between runs, and update
-preferences. The frequently used quality controls stay in the editor and video
-panels. About lists the version, credits the author (`vhanla`), links to
-`https://github.com/vhanla/faceforge`, and shows the runtime, pipeline, model
-licensing notes and the update status.
+The Settings dialog intentionally contains only options that are changed once:
+the theme, the execution provider, the models folder, unloading sessions
+between runs, the release-check preference and the acrylic background. The
+temporary and export folders are not exposed there; they are read from the
+settings file and the CLI. The frequently used quality controls stay in the
+editor and video panels. About shows the app tagline, the native UI/core notes
+and a link to `https://github.com/vhanla/faceforge`.
 
 ### Folder defaults
 
@@ -376,16 +388,16 @@ licensing notes and the update status.
 | Temp | empty | video analysis/processed-frame caches and the audio-mux intermediate. Empty means `<video folder>/.faceforge.cache` |
 | Exports | empty | default save/export folder. Empty means next to the input |
 
-With a configured Temp folder every clip gets its own
-`<temp>/<stem>-<hash>.faceforge.cache`, so caches from different clips never
-collide and can be deleted independently. Photo results are named
+Models is editable in Settings. Set Temp and Exports in the settings file or
+with `--temp-dir` / `--export-dir`. With a configured Temp folder every clip
+gets its own `<temp>/<stem>-<hash>.faceforge.cache`, so caches from different
+clips never collide and can be deleted independently. Photo results are named
 `<stem>_faceforge.png`; exported videos are `<stem>_faceforge.mp4`. An explicit
-`Save as…` path or `--save` overrides the photo default.
+`Save as...` path or `--save` overrides the photo default.
 
 ### Configuration file
 
-Settings are saved as JSON. The location is shown at the bottom of the Settings
-panel:
+Settings are saved as JSON:
 
 - Linux: `$XDG_CONFIG_HOME/faceforge/settings.json`, or
   `~/.config/faceforge/settings.json`
@@ -400,6 +412,7 @@ panel:
   "export_dir": "/home/me/Pictures/faceforge",
   "unload_after_run": false,
   "check_updates": true,
+  "acrylic": true,
   "update_interval_hours": 24,
   "last_update_check": 1793819640
 }
@@ -407,8 +420,11 @@ panel:
 
 Pass `--config FILE` (or set `FACEFORGE_CONFIG`) to use a different file;
 `--no-config` disables loading and saving. Missing fields fall back to the
-defaults, so older files keep working. The file is written when a setting
-changes and on exit.
+defaults, so older files keep working. The file is written when you press
+*Done* in Settings and on exit after a change. The path is not shown in the UI.
+The light/dark theme and acrylic are decided at startup: the theme is per
+session (`--light` or `F2`), and an acrylic change takes effect on the next
+launch.
 
 ### CLI and environment
 
@@ -423,30 +439,39 @@ config file, which wins over the defaults.
 | `--export-dir DIR` | `FACEFORGE_EXPORT_DIR` | default output folder |
 | `--config FILE` | `FACEFORGE_CONFIG` | settings file |
 | `--no-config` | — | do not read or write settings |
-| `--no-update-check` | `FACEFORGE_CHECK_UPDATES=0` | disable update checks |
-| `--check-updates` | `FACEFORGE_CHECK_UPDATES=1` | force them on |
-| — | `FACEFORGE_UPDATE_INTERVAL_HOURS` | periodic check interval |
-| `--target FILE` | `FACEFORGE_IDENTITY` (semicolon list for more) | startup target / identities |
-| `--identity FILE` | — | extra identity image |
-| `--save FILE` | — | explicit output path |
-| `--video FILE` | `FACEFORGE_VIDEO` | open a clip in the video workspace |
+| `--target FILE` | `FACEFORGE_TARGET` | startup target image |
+| `--identity FILE` | `FACEFORGE_IDENTITY` | identity image; repeatable or `;`-separated |
+| `--save FILE` | — | path shown in the output field |
+| `--video [FILE]` | `FACEFORGE_VIDEO` | open the video workspace |
+| `--light` | — | start with the light theme |
+| `--acrylic` / `--no-acrylic` | `FACEFORGE_ACRYLIC` | translucent window over a blurred desktop |
+| `--no-update-check` / `--check-updates` | `FACEFORGE_CHECK_UPDATES` | persisted release-check preference |
+| — | `FACEFORGE_UPDATE_INTERVAL_HOURS` | persisted check interval |
 | — | `FACEFORGE_SEQUENTIAL=1` | unload sessions between runs |
-| — | `FACEFORGE_AUTORUN=1` | run one job and save |
-| — | `FACEFORGE_SELFTEST=1` / `FACEFORGE_VIDEOTEST=path` | scripted checks |
+| `--screenshot OUT` | — | render, write a PPM and exit |
+| `--frames N` | — | frames to render before the screenshot |
+| `--wait` | — | screenshot once the pipeline goes idle |
+| `--size WxH` | — | initial window size |
+| `--help` | — | usage |
+| — | `FACEFORGE_SETTINGS=1` / `FACEFORGE_ABOUT=1` | open Settings/About at startup |
+| — | `FACEFORGE_STUDIO=1` / `FACEFORGE_STUDIO_PAINT=1` | open Studio (and paint a sample stroke) |
+| — | `FACEFORGE_VIDEOTEST=path` / `FACEFORGE_VIDEOTEST_KEEP=1` | scripted video check |
+| — | `FACEFORGE_SELFTEST=1` | full-resolution mode; ignore the config file |
 
-`FACEFORGE_SELFTEST` and `FACEFORGE_VIDEOTEST` ignore the user's config file and
-do not start automatic update checks unless a config path was supplied
-explicitly, keeping CI runs hermetic.
+`FACEFORGE_VIDEOTEST` opens a clip, analyses and processes the first frames,
+exports a short range and plays it back, then exits; `FACEFORGE_VIDEOTEST_KEEP=1`
+leaves the window open on the result instead. `FACEFORGE_SELFTEST` and
+`FACEFORGE_VIDEOTEST` ignore the user's config file unless `--config` or
+`FACEFORGE_CONFIG` was supplied explicitly, keeping CI runs hermetic. There is
+no scripted photo-mode end-to-end driver yet.
 
 ### Update checks
 
-`About` checks
-`https://api.github.com/repos/vhanla/faceforge/releases/latest` in the
-background — the UI never blocks — and reports whether a newer release exists,
-with a link to it. A repository without published releases is reported as
-"No releases published yet", and a stalled request times out so it can be
-retried. Checks run at most once per interval and can be turned off in Settings
-or with `--no-update-check`. Nothing is downloaded or installed automatically.
+The *Check GitHub releases* checkbox, `--check-updates` / `--no-update-check`
+and `FACEFORGE_CHECK_UPDATES` only persist a preference: the native UI does not
+perform a network check yet, and About shows no update status. Nothing is
+queried or downloaded, and `update_interval_hours` / `last_update_check` are
+reserved for a future implementation.
 
 ### CI and releases
 
@@ -481,14 +506,14 @@ is no entry. Model weights are never included — the packages ship
 
 ## Editing video
 
-The `Video` button in the top bar switches to a workspace built specifically for
-face swapping in clips. It shares the identity library and the engine with the
-still-image editor but owns its project file, timeline, caches and jobs, so
+The `Video` entry in the left icon rail switches to a workspace built specifically
+for face swapping in clips. It shares the identity library and the engine with
+the still-image editor but owns its project file, timeline, caches and jobs, so
 switching back to `Photo` leaves that work untouched.
 
 ![Video workspace](docs/video.png)
 
-1. **Open a clip.** `Open video…` or drop a video anywhere in the window. The
+1. **Open a clip.** `Open video...` or drop a video anywhere in the window. The
    container stays open and frames are decoded on demand — nothing is written to
    disk until a processed frame is cached. Metadata (resolution, fps, frame
    count, duration) is read straight from the container.
@@ -511,13 +536,14 @@ switching back to `Photo` leaves that work untouched.
    thumbnail cropped from the sequence's start frame and tinted with the same
    colour as its viewer outline, so rows can be matched to faces visually
    instead of by number alone; the dropdown shows a preview of the identity it
-   will apply. `All faces: default` / `All faces: skip` set every row at once,
-   and `Skip unassigned` makes newly seen faces stay untouched unless you assign
+   will apply. `All: default` / `All: skip` set every row at once, and
+   `Skip unassigned` makes newly seen faces stay untouched unless you assign
    them. `Apply` sets the whole sequence, `Forward` propagates it to everything
-   after it, and `This frame` stores a one-frame exception. Assignments are
-   stored as frame ranges, so they survive re-analysis.
-5. **Process & cache.** `Process frame`, `Process sequence` or `Process current
-   chunk` render the swap with the current assignments. `Restore mouths` applies
+   after it, `This frame` stores a one-frame exception and `Clear override`
+   removes it. Assignments are stored as frame ranges, so they survive
+   re-analysis.
+5. **Process & cache.** `Process frame`, `Process seq` or `Process chunk N/M`
+   render the swap with the current assignments. `Restore mouths` applies
    the photo editor's mouth restoration to the swapped faces. `Match input grain`
    re-applies the clip's original texture on the restored faces; it is a
    separate video setting (the photo checkbox does not affect it), applies to
@@ -525,11 +551,11 @@ switching back to `Photo` leaves that work untouched.
    limited to the padded face regions and the pass runs in place, so it adds
    roughly 16 ms at 1080p and 56 ms at 4K per frame instead of 31/122 ms.
    `Low quality` works on a 640 px-long-side clone and **never runs the
-   enhancer** (fast previews); `High quality` runs the swap at the source
-   resolution and uses the chosen enhancer. A line under the checkboxes states
-   what will happen for the current clip (for example `Fast 640 px pass ·
-   enhancer off`, `Full res · enhancer on (GFPGAN, 4096 MB)` or
-   `Full res · enhancer failed, disabled for this clip`). GFPGAN works on each
+   enhancer** (fast previews); leave it off to swap at the source resolution
+   with the chosen enhancer. A line under the checkboxes states what will
+   happen for the current clip (for example `Fast 640 px pass · enhancer off`,
+   `Full res · enhancer on` or `Full res · enhancer failed for this clip`).
+   GFPGAN works on each
    face's 512×512 crop, so memory does not grow with frame size and high quality
    attempts the enhancer even on large frames and small GPUs. If a crop really
    fails, the remaining faces are still enhanced (a per-face split fallback) and
@@ -544,12 +570,12 @@ switching back to `Photo` leaves that work untouched.
    when opening another video.
 6. **Retouch a frame (Studio).** Turn on `Paint retouch on this frame` and drag
    over the viewer to reveal the original under the swap; `Erase`/`Restore` (or
-   right-click) pick the brush, and `Size`, `Hard` and `Opac` shape it. Strokes
-   are stored as vectors in source-frame pixels, so they stay sharp at any
-   resolution and survive reprocessing. `View original` shows the untouched
-   frame, `Bypass this edit` temporarily disables the retouch (the sequence line
-   still counts it), and `Undo stroke` / `Delete edit` / `Clear all edits`
-   remove work. `Copy to similar faces` finds the same face in the other frames
+   right-click) pick the brush, and the `Size`, `Hard` and `Opacity` sliders
+   shape it. Strokes are stored as vectors in source-frame pixels, so they stay
+   sharp at any resolution and survive reprocessing. `View original` shows the
+   untouched frame, `Bypass this edit` temporarily disables the retouch (the
+   sequence line still counts it), and `Undo stroke` / `Delete edit` / `Clear`
+   remove work. `Copy to similar` finds the same face in the other frames
    of the sequence by size and position, offsets the strokes to each face box
    and copies them; if some targets are already edited you choose `Overwrite` or
    `Skip edited`. Edits are saved in the project and stamped into exported
@@ -569,7 +595,7 @@ switching back to `Photo` leaves that work untouched.
    `Audio` muxes the original clip's track for the exported span, and
    `Split chunks` encodes the range in parts and concatenates them without
    re-encoding (good for long clips). The project is saved next to the video as
-   `<video>.faceforge.json`, and the default output is
+   `<stem>.faceforge.json`, and the default output is
    `<export folder or video folder>/<stem>_faceforge.mp4`.
 
 `FACEFORGE_VIDEO=<path>` opens a clip directly in the video workspace at
@@ -624,7 +650,7 @@ Measured session deltas on a GTX 1650 (desktop already using ~1.4 GB during the 
 
 On the reference machine a resident full pipeline with GFPGAN peaked at
 **4041 MiB used**, with ~1415 MiB already taken by the desktop. Enabling
-`sequential` (or the GUI's *Unload models after each run*) releases sessions
+`sequential` (or the GUI's *Unload models between runs*) releases sessions
 between stages and lowers the peak to **3516 MiB**, at the cost of reloading
 them (the warm run grows from ~2.2 s to ~4.5 s). Real-ESRGAN x4 uses more VRAM
 than GFPGAN and is much slower, so GFPGAN is the better fit for 4 GB.
@@ -691,8 +717,8 @@ models with commercially licensed ones. CodeFormer is not used here.
   `LD_LIBRARY_PATH` (Linux) or `PATH` (Windows) or reachable through the
   binary's rpath. The app falls back to CPU if `Auto` is selected.
 - **Out of memory on 4 GB** — the resident pipeline needs ~2.6 GB on top of
-  whatever the desktop uses (see the report). Enable *Unload models after each
-  run* or `FACEFORGE_SEQUENTIAL=1`, switch the enhancer to `None`, close other
+  whatever the desktop uses (see the report). Enable *Unload models between
+  runs* or `FACEFORGE_SEQUENTIAL=1`, switch the enhancer to `None`, close other
   GPU apps, or run `ffbench` with the CPU provider to confirm the models are
   fine. A CUDA allocation failure is surfaced as a pipeline error; the app
   itself keeps running.

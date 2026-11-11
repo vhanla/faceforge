@@ -2087,6 +2087,7 @@ void video_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
         const int def = state->app ? state->app->defaultIdentity() : 0;
         ui_text(a, ctx, x + 16.0f, trans_r.y - 20.0f, "faces:", t.text_dim, 12.0f);
         float fx = x + 64.0f;
+        const float fx_max = x + w - 16.0f;
         for (int k = 0; k < lcount && k < 3; ++k) {
             const bool skipped = ids[k] == app::kVideoSkipId;
             const int id = ids[k] >= 0 ? ids[k] : def;
@@ -2097,10 +2098,12 @@ void video_center_panel(Arena* a, UIContext* ctx, UIState* state, const Layout& 
                 if (id >= 0 && id < idsnap.count) label = idsnap.labels[id].c_str();
             }
             (void)nid;
-            ui_text(a, ctx, fx, trans_r.y - 20.0f,
-                    arena_fmt(a, "%d:%s", k + 1, skipped ? "unchanged" : label),
+            const char* entry = arena_fmt(a, "%d:%s", k + 1, skipped ? "unchanged" : label);
+            const float ew = text_width(entry, 12.0f, 2);
+            if (fx + ew > fx_max) break;
+            ui_text(a, ctx, fx, trans_r.y - 20.0f, entry,
                     skipped ? t.text_muted : face_color(k), 12.0f);
-            fx += 90.0f;
+            fx += ew + 14.0f;
         }
     }
 }

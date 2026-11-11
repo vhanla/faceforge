@@ -465,6 +465,10 @@ int main(int argc, char** argv) {
     state->acrylic = acrylic_on;
     state->mode = options.video ? AppMode::Video : AppMode::Photo;
     if (std::getenv("FACEFORGE_SETTINGS")) state->show_settings = true;
+    if (std::getenv("FACEFORGE_ABOUT")) {
+        state->show_about = true;
+        state->show_settings = false;
+    }
     std::snprintf(state->models_dir, sizeof(state->models_dir), "%s", app->model_dir.c_str());
 
     if (std::getenv("FACEFORGE_SELFTEST")) {
