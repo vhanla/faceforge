@@ -6,10 +6,11 @@ The earlier Zig + DVUI desktop app is archived on the `legacy-zig` branch.
 
 ```
 gui-native/
-  amuie/          vendored AMUIE library (from ../arenaui/src) plus local
-                  additions: texture support (CMD_DRAW_TEXTURE + OpenGL
-                  registry + ui_image) and editable widgets (ui_text_edit,
-                  ui_slider) with a platform input bridge
+  amuie/          vendored AMUIE library, kept in sync with ../arenaui/src:
+                  textures (CMD_DRAW_TEXTURE + OpenGL registry + ui_image),
+                  editable widgets (ui_text_edit, ui_slider), keyboard/
+                  clipboard/drag-drop input, acrylic window, file dialogs and
+                  a media combo
   amuie-tools/    asset baker + icon SVGs (regenerate the font atlas)
   amuie-tests/    library unit tests (headless; run with `amuie-tests`)
   app/            FaceForge itself: the UI-agnostic app layer (pipeline,
@@ -19,9 +20,10 @@ gui-native/
                   `faceforge-gui` and the test binary
 ```
 
-`amuie/main.cpp` is the upstream library's demo entry point (kept for
-reference); it is not compiled here. `UPSTREAM_CMakeLists.txt` is the library's
-original build file.
+The engine files under `amuie/` mirror `../arenaui/src` (the only extra there is
+the demo screen); `amuie/main.cpp` is the library's demo entry point, kept for
+reference but not compiled here. `UPSTREAM_CMakeLists.txt` is the library's
+build file (the `amuie` static library, demo and `test_suite`).
 
 The app layer is deliberately UI-agnostic and mirrors the retired Zig UI: it
 owns the engine, the pristine base image, the identity library, the per-face

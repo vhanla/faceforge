@@ -7,32 +7,55 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(glfw3 3.3 REQUIRED)
 
-add_executable(muie_demo
-    src/main.cpp
+# ---- AMUIE: engine + widgets + OpenGL backend ------------------------------
+# Build the engine as a static library so other projects can link it. The core
+# and widgets never include a platform/GPU header; only platform/ and backend/
+# may, and they are part of this target.
+add_library(amuie STATIC
     src/core/font.cpp
     src/widgets/ui_widgets.cpp
     src/platform/window.cpp
+    src/platform/input.cpp
     src/backend/opengl3_backend.cpp
     src/assets/font_atlas.cpp
+)
+
+target_include_directories(amuie PUBLIC src)
+target_link_libraries(amuie PUBLIC glfw)
+
+if(WIN32)
+    target_link_libraries(amuie PUBLIC Opengl32 dwmapi)
+elseif(APPLE)
+    target_link_libraries(amuie PUBLIC "-framework OpenGL")
+else()
+    target_link_libraries(amuie PUBLIC GL)
+    # X11 backs the KDE/KWin blur-behind hint, the native image clipboard and
+    # XDND drops (see src/platform/window.cpp).
+    find_package(X11 QUIET)
+    if(X11_FOUND)
+        target_link_libraries(amuie PUBLIC X11::X11)
+        target_compile_definitions(amuie PUBLIC AMUIE_HAVE_X11=1)
+    endif()
+endif()
+
+if(NOT MSVC)
+    target_compile_options(amuie PRIVATE -Wall -Wextra)
+endif()
+
+# ---- Demo ------------------------------------------------------------------
+add_executable(muie_demo
+    src/main.cpp
     src/demo/faceforge.cpp
 )
 
-target_include_directories(muie_demo PRIVATE src)
-
-target_link_libraries(muie_demo PRIVATE glfw)
-
-if(WIN32)
-    target_link_libraries(muie_demo PRIVATE Opengl32)
-elseif(APPLE)
-    target_link_libraries(muie_demo PRIVATE "-framework OpenGL")
-else()
-    target_link_libraries(muie_demo PRIVATE GL)
-endif()
+target_link_libraries(muie_demo PRIVATE amuie)
 
 if(NOT MSVC)
     target_compile_options(muie_demo PRIVATE -Wall -Wextra)
 endif()
 
+# ---- Headless widget tests -------------------------------------------------
+# The suite only exercises widgets + font, so it stays free of GLFW/OpenGL.
 add_executable(test_suite
     tests/test_suite.cpp
     src/core/font.cpp
@@ -40,6 +63,12 @@ add_executable(test_suite
     src/assets/font_atlas.cpp
 )
 target_include_directories(test_suite PRIVATE src)
+
 if(NOT MSVC)
-    target_compile_options(test_suite PRIVATE -Wall -Wextra)
+    # Release builds define NDEBUG, which would strip the assert-based checks;
+    # keep them active for this target.
+    target_compile_options(test_suite PRIVATE -Wall -Wextra -UNDEBUG)
 endif()
+
+enable_testing()
+add_test(NAME test_suite COMMAND test_suite)
